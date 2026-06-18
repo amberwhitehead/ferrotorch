@@ -35,6 +35,7 @@ use std::sync::Once;
 use ferrotorch_core::Device;
 use ferrotorch_core::Tensor;
 use ferrotorch_core::creation::from_vec;
+use ferrotorch_core::grad_fns::activation::GeluApproximate;
 
 static GPU_INIT: Once = Once::new();
 
@@ -237,6 +238,99 @@ fn bf16_op_sweep_gpu() {
     results.push(run("sigmoid", || {
         check(ferrotorch_core::grad_fns::activation::sigmoid(&a))
     }));
+    results.push(run("relu_high_level", || {
+        let relu_data: Vec<f32> = signed_data.iter().copied().take(8).collect();
+        let relu_input = bf16_cuda(&relu_data, &[relu_data.len()]);
+        let out =
+            ferrotorch_core::grad_fns::activation::relu(&relu_input).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = relu_data.iter().map(|x| x.max(0.0)).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("gelu_high_level", || {
+        let out = ferrotorch_core::grad_fns::activation::gelu(&a).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = data
+            .iter()
+            .map(|x| 0.5 * x * (1.0 + libm_erf(x / 2.0_f32.sqrt())))
+            .collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("gelu_tanh_high_level", || {
+        let out = ferrotorch_core::grad_fns::activation::gelu_with(&a, GeluApproximate::Tanh)
+            .map_err(|e| format!("{e}"))?;
+        let sqrt_2_over_pi = (2.0_f32 / std::f32::consts::PI).sqrt();
+        let expected: Vec<f32> = data
+            .iter()
+            .map(|x| 0.5 * x * (1.0 + (sqrt_2_over_pi * (x + 0.044715 * x * x * x)).tanh()))
+            .collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("gelu_sigmoid_high_level", || {
+        let out = ferrotorch_core::grad_fns::activation::gelu_with(&a, GeluApproximate::Sigmoid)
+            .map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = data
+            .iter()
+            .map(|x| x / (1.0 + (-1.702 * x).exp()))
+            .collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("silu_high_level", || {
+        let out = ferrotorch_core::grad_fns::activation::silu(&a).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = data.iter().map(|x| x / (1.0 + (-x).exp())).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("atan_high_level", || {
+        let out =
+            ferrotorch_core::grad_fns::transcendental::atan(&signed).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x.atan()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("ceil_high_level", || {
+        let out =
+            ferrotorch_core::grad_fns::transcendental::ceil(&signed).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x.ceil()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("floor_high_level", || {
+        let out = ferrotorch_core::grad_fns::transcendental::floor(&signed)
+            .map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x.floor()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("round_high_level", || {
+        let round_data = [-2.5, -1.5, -0.5, -0.0, 0.0, 0.5, 1.5, 2.5, f32::NAN];
+        let x = bf16_cuda(&round_data, &[round_data.len()]);
+        let out =
+            ferrotorch_core::grad_fns::transcendental::round(&x).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = round_data.iter().copied().map(round_ties_even).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("trunc_high_level", || {
+        let out = ferrotorch_core::grad_fns::transcendental::trunc(&signed)
+            .map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x.trunc()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("frac_high_level", || {
+        let out =
+            ferrotorch_core::grad_fns::transcendental::frac(&signed).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x - x.trunc()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("sign_high_level", || {
+        let out =
+            ferrotorch_core::grad_fns::transcendental::sign(&signed).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data
+            .iter()
+            .map(|&x| {
+                if x.is_nan() || x == 0.0 {
+                    0.0
+                } else {
+                    x.signum()
+                }
+            })
+            .collect();
+        check_values(&out, &expected)
+    }));
     results.push(run("softmax", || {
         // softmax needs at least 2D-shape with last dim
         let x = bf16_cuda(&data, &[1, n]);
@@ -370,4 +464,36 @@ fn bf16_op_sweep_gpu() {
         fail, 0,
         "bf16 op sweep had {fail} failures (see table above)"
     );
+}
+
+/// Minimal erf for the GELU reference (Abramowitz & Stegun 7.1.26, the same
+/// Hastings polynomial the kernel uses). Computed in f64 and narrowed for the
+/// f32 caller, which is stricter than bf16 output precision.
+fn libm_erf(x: f32) -> f32 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = f64::from(x.abs());
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t
+            * (-x * x).exp();
+    (sign * y) as f32
+}
+
+fn round_ties_even(x: f32) -> f32 {
+    if !x.is_finite() {
+        return x;
+    }
+    let lo = x.floor();
+    let frac = x - lo;
+    if frac < 0.5 {
+        lo
+    } else if frac > 0.5 {
+        lo + 1.0
+    } else if (lo as i64) % 2 == 0 {
+        lo
+    } else {
+        lo + 1.0
+    }
 }

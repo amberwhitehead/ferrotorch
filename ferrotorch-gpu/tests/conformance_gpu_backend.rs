@@ -600,8 +600,8 @@ mod test_graph {
     // CaptureMode
 
     #[test]
-    fn capture_mode_default_is_thread_local() {
-        assert_eq!(CaptureMode::default(), CaptureMode::ThreadLocal);
+    fn capture_mode_default_is_global_like_pytorch() {
+        assert_eq!(CaptureMode::default(), CaptureMode::Global);
     }
 
     #[test]
@@ -686,28 +686,21 @@ mod test_graph {
 
     // CUDA graph capture + replay (live GPU)
     //
-    // Fix #897: The root cause was that gpu_add_into dispatches on device.stream()
-    // (the device default stream). Under parallel test execution, other tests also
-    // dispatch on device.stream(), and during Global-mode capture those unrelated
-    // ops would invalidate the capture with CUDA_ERROR_STREAM_CAPTURE_INVALIDATED.
-    //
-    // The fix has two parts:
-    // 1. gpu_add_into_on_stream was added to allow callers to dispatch on an
-    //    explicit stream, enabling real graph capture when the caller passes the
-    //    capture stream.
-    // 2. This conformance test uses a dedicated capture stream with ThreadLocal
-    //    mode so parallel tests on other streams (including device.stream()) cannot
-    //    invalidate the capture. gpu_add_into (unchanged) is used during capture so
-    //    it runs on device.stream() — not recorded in the graph, but the CapturedGraph
-    //    API surface (upload/num_replays/is_uploaded/has_pool) is exercised correctly.
-    //    Real kernel-in-graph capture is covered by test_gpu_graph_pool.rs.
+    // PyTorch defaults capture_error_mode to "global"; ferrotorch's
+    // CaptureMode::default follows that. This conformance test is an API-surface
+    // probe for upload/replay counters on an intentionally empty graph, so it uses
+    // an explicit Relaxed capture on a dedicated stream to stay deterministic under
+    // the Rust test harness's parallel CUDA traffic. Real kernel-in-graph capture is
+    // covered by test_gpu_graph_pool.rs.
 
     #[test]
     fn captured_graph_upload_and_replay_count_api() {
         use std::sync::Arc;
 
         use ferrotorch_gpu::device::GpuDevice;
-        use ferrotorch_gpu::graph::{CapturePool, begin_capture_with_pool, end_capture_with_pool};
+        use ferrotorch_gpu::graph::{
+            CaptureMode, CapturePool, begin_capture_with_pool_mode, end_capture_with_pool,
+        };
         use ferrotorch_gpu::transfer::{alloc_zeros_f32, cpu_to_gpu};
 
         // Serialize graph capture across tests in this binary so the CUDA
@@ -740,7 +733,8 @@ mod test_graph {
         // that keeps device.stream() out of the capture window entirely and avoids
         // CUDA_ERROR_STREAM_CAPTURE_INVALIDATED from parallel tests on device.stream().
         let pool = Arc::new(CapturePool::new());
-        begin_capture_with_pool(&pool, &capture_stream).expect("begin_capture_with_pool");
+        begin_capture_with_pool_mode(&pool, &capture_stream, CaptureMode::Relaxed)
+            .expect("begin_capture_with_pool_mode");
         // (no ops recorded — the graph is intentionally empty for this API test)
         let graph = end_capture_with_pool(&capture_stream, Arc::clone(&pool))
             .expect("end_capture_with_pool");

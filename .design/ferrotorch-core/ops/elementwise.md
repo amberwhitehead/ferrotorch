@@ -110,8 +110,9 @@ Reductions at `:1113-1342`:
 `fast_add` / `fast_mul` / `fast_sub` / `crate::ops::elementwise::fast_div`
 directly. `crate::grad_fns::transcendental::exp` / `log` /
 `sin` / `cos` at `grad_fns/transcendental.rs:281,384,491,568` call
-`fast_exp`, `fast_log`, `fast_sin`, `fast_cos`. `grad_fns::activation::sigmoid`
-/ `tanh` at `grad_fns/activation.rs:928,988` call `fast_sigmoid` /
+`fast_exp`, `fast_log`, `fast_sin`, `fast_cos`. `pub fn sigmoid in
+ferrotorch-core/src/grad_fns/activation.rs` and `pub fn tanh in
+ferrotorch-core/src/grad_fns/activation.rs` call `fast_sigmoid` /
 `fast_tanh`. The `unary_map` / `scalar_map` / `binary_map` are used
 by `grad_fns::arithmetic::scale_tensor` (`grad_fns/arithmetic.rs:38`
 import) and by every `crate::special::*` op (the polynomial families,

@@ -36,7 +36,7 @@
 //! | REQ-25 (`round`) | SHIPPED | `round` + `round_half_to_even` RNE helper consumed by `Tensor::round_t`; `round.decimals` overload is a follow-up; closes #1328. |
 //! | REQ-26 (`trunc`) | SHIPPED | `trunc` + shared `ZerosLikeBackward` consumed by `Tensor::trunc_t`; closes #1329. |
 //! | REQ-27 (`frac`) | SHIPPED | `frac` + `FracBackward` (pass-through gradient) consumed by `Tensor::frac_t`; closes #1330. |
-//! | REQ-28 (`sign`) | SHIPPED | `sign` (NaN-propagating, `sign(0) = 0`) + shared `ZerosLikeBackward` consumed by `Tensor::sign_t`; closes #1331. |
+//! | REQ-28 (`sign`) | SHIPPED | `sign` (`NaN -> 0`, `sign(0) = 0`) + shared `ZerosLikeBackward` consumed by `Tensor::sign_t`; closes #1331. |
 //! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor`; CPU uses `num_traits::Float::is_sign_negative`, CUDA uses `GpuBackend::signbit_mask` for f32/f64/f16/bf16 including PyTorch's f16 CUDA NaN handling; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
 //! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
 //! | REQ-31 (`copysign`) | SHIPPED | `copysign` + `CopysignBackward` (grad to magnitude only, `magnitude==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1334. |
@@ -50,7 +50,7 @@ use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::bool_tensor::BoolTensor;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::gpu_dispatch::gpu_backend;
+use crate::gpu_dispatch::{GpuUnaryOp, gpu_backend};
 use crate::grad_fns::arithmetic::reduce_grad_to_shape;
 use crate::ops::elementwise::{binary_map, fast_cos, fast_sin, unary_map_named};
 use crate::shape::broadcast_shapes;
@@ -1220,29 +1220,22 @@ pub fn clip_tensor<T: Float>(
 /// `tools/autograd/derivatives.yaml` `... self: zeros_like(grad)` entries).
 ///
 /// Pre-#1743 (CORE-049) this unconditionally created CPU storage, silently
-/// returning a CPU gradient for a CUDA input. The zeros are staged on the
-/// host and uploaded to `like`'s device when it is CUDA-resident.
+/// returning a CPU gradient for a CUDA input. CUDA tensors now allocate their
+/// zero gradient directly on the originating device.
 fn zeros_like_tensor<T: Float>(like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if like.is_cuda() {
+        return cuda_zeros_like(like);
+    }
     let zero = <T as num_traits::Zero>::zero();
-    let n = crate::shape::numel(like.shape()).max(1);
-    let zeros = Tensor::from_storage(
-        TensorStorage::cpu(vec![zero; n]),
+    Tensor::from_storage(
+        TensorStorage::cpu(vec![zero; like.numel()]),
         like.shape().to_vec(),
         false,
-    )?;
-    if like.is_cuda() {
-        zeros.to(like.device())
-    } else {
-        Ok(zeros)
-    }
+    )
 }
 
-/// Device-aware unary VJP for derivative closures that do not have a resident
-/// CUDA kernel.
-///
-/// A Rust closure cannot be compiled into CUDA PTX by this crate. Call sites
-/// only enter this helper when a CUDA tensor is involved, so return a named
-/// unsupported-CUDA error instead of silently detouring through host memory.
+/// Device-aware unary VJP. CPU inputs use the Rust closure; CUDA inputs build
+/// an equivalent resident expression/kernel selected by the operation name.
 fn cuda_unary_vjp<T: Float>(
     grad_output: &Tensor<T>,
     saved: &Tensor<T>,
@@ -1251,7 +1244,8 @@ fn cuda_unary_vjp<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     no_grad(|| {
         if saved.is_cuda() || grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op });
+            let factor = cuda_derivative_factor(saved, op)?;
+            return crate::grad_fns::arithmetic::mul(grad_output, &factor);
         }
         let factor = unary_map_named(saved, op, &deriv)?;
         crate::grad_fns::arithmetic::mul(grad_output, &factor)
@@ -1291,6 +1285,291 @@ fn finish_unary_saving_output<T: Float, G: GradFn<T> + 'static>(
     }
 }
 
+fn cuda_full_like_tensor<T: Float>(
+    like: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let Some(storage) = cuda_fill_storage(like, value, op_name)? else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
+    };
+    Tensor::from_storage(storage, like.shape().to_vec(), false)
+}
+
+fn cuda_unary_special<T: Float>(
+    input: &Tensor<T>,
+    _op_name: &'static str,
+    op: GpuUnaryOp,
+) -> FerrotorchResult<Tensor<T>> {
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input = input.contiguous()?;
+    let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+        T,
+        "unary_special",
+        f32 => backend.unary_special_f32(input.gpu_handle()?, op),
+        f64 => backend.unary_special_f64(input.gpu_handle()?, op),
+        bf16 => backend.unary_special_bf16_bf16(input.gpu_handle()?, op),
+        f16 => backend.unary_special_f16(input.gpu_handle()?, op),
+    )?;
+    Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+}
+
+fn cuda_add_const<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let c = cuda_full_like_tensor(input, value, op_name)?;
+    crate::grad_fns::arithmetic::add(input, &c)
+}
+
+fn cuda_sub_const<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let c = cuda_full_like_tensor(input, value, op_name)?;
+    crate::grad_fns::arithmetic::sub(input, &c)
+}
+
+fn cuda_const_sub<T: Float>(
+    value: T,
+    input: &Tensor<T>,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let c = cuda_full_like_tensor(input, value, op_name)?;
+    crate::grad_fns::arithmetic::sub(&c, input)
+}
+
+fn cuda_mul_const<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let c = cuda_full_like_tensor(input, value, op_name)?;
+    crate::grad_fns::arithmetic::mul(input, &c)
+}
+
+fn cuda_div_const<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let c = cuda_full_like_tensor(input, value, op_name)?;
+    crate::grad_fns::arithmetic::div(input, &c)
+}
+
+fn cuda_recip<T: Float>(input: &Tensor<T>, op_name: &'static str) -> FerrotorchResult<Tensor<T>> {
+    let one = <T as num_traits::One>::one();
+    let c = cuda_full_like_tensor(input, one, op_name)?;
+    crate::grad_fns::arithmetic::div(&c, input)
+}
+
+fn cuda_square<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::arithmetic::mul(input, input)
+}
+
+fn cuda_square_add_const<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let sq = cuda_square(input)?;
+    cuda_add_const(&sq, value, op_name)
+}
+
+fn cuda_square_sub_from_one<T: Float>(
+    input: &Tensor<T>,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let sq = cuda_square(input)?;
+    let one = <T as num_traits::One>::one();
+    cuda_const_sub(one, &sq, op_name)
+}
+
+fn cuda_sinc_forward<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let pi = T::from(std::f64::consts::PI)
+        .ok_or(FerrotorchError::NotImplementedOnCuda { op: "sinc" })?;
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let px = cuda_mul_const(input, pi, "sinc")?;
+    let sin_px = sin(&px)?;
+    let raw = crate::grad_fns::arithmetic::div(&sin_px, &px)?;
+    let zeros = cuda_full_like_tensor(input, zero, "sinc")?;
+    let ones = cuda_full_like_tensor(input, one, "sinc")?;
+    let mask = BoolTensor::eq_t(input, &zeros)?;
+    crate::ops::indexing::where_cond_bt(&mask, &ones, &raw)
+}
+
+fn cuda_sinc_backward_factor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let pi = T::from(std::f64::consts::PI)
+        .ok_or(FerrotorchError::NotImplementedOnCuda { op: "sinc" })?;
+    let zero = <T as num_traits::Zero>::zero();
+    let px = cuda_mul_const(input, pi, "sinc")?;
+    let cos_px = cos(&px)?;
+    let sin_px = sin(&px)?;
+    let px_cos = crate::grad_fns::arithmetic::mul(&px, &cos_px)?;
+    let numerator = crate::grad_fns::arithmetic::sub(&px_cos, &sin_px)?;
+    let x2 = cuda_square(input)?;
+    let denom = cuda_mul_const(&x2, pi, "sinc")?;
+    let raw = crate::grad_fns::arithmetic::div(&numerator, &denom)?;
+    let zeros = cuda_full_like_tensor(input, zero, "sinc")?;
+    let mask = BoolTensor::eq_t(&denom, &zeros)?;
+    crate::ops::indexing::where_cond_bt(&mask, &zeros, &raw)
+}
+
+fn cuda_derivative_factor<T: Float>(
+    saved: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let one = <T as num_traits::One>::one();
+    match op {
+        "tan" => cuda_square_add_const(saved, one, op),
+        "asin" => {
+            let denom = crate::grad_fns::arithmetic::sqrt(&cuda_square_sub_from_one(saved, op)?)?;
+            cuda_recip(&denom, op)
+        }
+        "acos" => {
+            let denom = crate::grad_fns::arithmetic::sqrt(&cuda_square_sub_from_one(saved, op)?)?;
+            let recip = cuda_recip(&denom, op)?;
+            crate::grad_fns::arithmetic::neg(&recip)
+        }
+        "atan" => cuda_recip(&cuda_square_add_const(saved, one, op)?, op),
+        "sinh" => cosh(saved),
+        "cosh" => sinh(saved),
+        "asinh" => {
+            let denom = crate::grad_fns::arithmetic::sqrt(&cuda_square_add_const(saved, one, op)?)?;
+            cuda_recip(&denom, op)
+        }
+        "acosh" => {
+            let sq_minus = cuda_sub_const(&cuda_square(saved)?, one, op)?;
+            let denom = crate::grad_fns::arithmetic::sqrt(&sq_minus)?;
+            cuda_recip(&denom, op)
+        }
+        "atanh" => cuda_recip(&cuda_square_sub_from_one(saved, op)?, op),
+        "exp2" => {
+            let ln2 = T::from(std::f64::consts::LN_2)
+                .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+            cuda_mul_const(saved, ln2, op)
+        }
+        "expm1" => cuda_add_const(saved, one, op),
+        "log2" => {
+            let ln2 = T::from(std::f64::consts::LN_2)
+                .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+            let denom = cuda_mul_const(saved, ln2, op)?;
+            cuda_recip(&denom, op)
+        }
+        "log10" => {
+            let ln10 = T::from(std::f64::consts::LN_10)
+                .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+            let denom = cuda_mul_const(saved, ln10, op)?;
+            cuda_recip(&denom, op)
+        }
+        "log1p" => cuda_recip(&cuda_add_const(saved, one, op)?, op),
+        "frac" => cuda_full_like_tensor(saved, one, op),
+        "sinc" => cuda_sinc_backward_factor(saved),
+        _ => Err(FerrotorchError::NotImplementedOnCuda { op }),
+    }
+}
+
+fn cuda_forward_named<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+
+    no_grad(|| {
+        let one = <T as num_traits::One>::one();
+        let output = match op {
+            "tan" => {
+                let s = sin(input)?;
+                let c = cos(input)?;
+                crate::grad_fns::arithmetic::div(&s, &c)?
+            }
+            "asin" => {
+                let denom =
+                    crate::grad_fns::arithmetic::sqrt(&cuda_square_sub_from_one(input, op)?)?;
+                let ratio = crate::grad_fns::arithmetic::div(input, &denom)?;
+                cuda_unary_special(&ratio, op, GpuUnaryOp::Atan)?
+            }
+            "acos" => {
+                let asin_x = asin(input)?;
+                let half_pi = T::from(std::f64::consts::FRAC_PI_2)
+                    .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_const_sub(half_pi, &asin_x, op)?
+            }
+            "atan" => cuda_unary_special(input, op, GpuUnaryOp::Atan)?,
+            "sinh" => {
+                let ex = exp(input)?;
+                let neg = crate::grad_fns::arithmetic::neg(input)?;
+                let e_neg = exp(&neg)?;
+                let diff = crate::grad_fns::arithmetic::sub(&ex, &e_neg)?;
+                let two = T::from(2.0).ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_div_const(&diff, two, op)?
+            }
+            "cosh" => {
+                let ex = exp(input)?;
+                let neg = crate::grad_fns::arithmetic::neg(input)?;
+                let e_neg = exp(&neg)?;
+                let sum = crate::grad_fns::arithmetic::add(&ex, &e_neg)?;
+                let two = T::from(2.0).ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_div_const(&sum, two, op)?
+            }
+            "asinh" => {
+                let inside = cuda_square_add_const(input, one, op)?;
+                let root = crate::grad_fns::arithmetic::sqrt(&inside)?;
+                let sum = crate::grad_fns::arithmetic::add(input, &root)?;
+                log(&sum)?
+            }
+            "acosh" => {
+                let sq_minus = cuda_sub_const(&cuda_square(input)?, one, op)?;
+                let root = crate::grad_fns::arithmetic::sqrt(&sq_minus)?;
+                let sum = crate::grad_fns::arithmetic::add(input, &root)?;
+                log(&sum)?
+            }
+            "atanh" => {
+                let numerator = cuda_add_const(input, one, op)?;
+                let denominator = cuda_const_sub(one, input, op)?;
+                let ratio = crate::grad_fns::arithmetic::div(&numerator, &denominator)?;
+                let logged = log(&ratio)?;
+                let half = T::from(0.5).ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_mul_const(&logged, half, op)?
+            }
+            "exp2" => {
+                let ln2 = T::from(std::f64::consts::LN_2)
+                    .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                let scaled = cuda_mul_const(input, ln2, op)?;
+                exp(&scaled)?
+            }
+            "expm1" => cuda_sub_const(&exp(input)?, one, op)?,
+            "log2" => {
+                let logged = log(input)?;
+                let ln2 = T::from(std::f64::consts::LN_2)
+                    .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_div_const(&logged, ln2, op)?
+            }
+            "log10" => {
+                let logged = log(input)?;
+                let ln10 = T::from(std::f64::consts::LN_10)
+                    .ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+                cuda_div_const(&logged, ln10, op)?
+            }
+            "log1p" => log(&cuda_add_const(input, one, op)?)?,
+            "ceil" => cuda_unary_special(input, op, GpuUnaryOp::Ceil)?,
+            "floor" => cuda_unary_special(input, op, GpuUnaryOp::Floor)?,
+            "round" => cuda_unary_special(input, op, GpuUnaryOp::Round)?,
+            "trunc" => cuda_unary_special(input, op, GpuUnaryOp::Trunc)?,
+            "frac" => cuda_unary_special(input, op, GpuUnaryOp::Frac)?,
+            "sign" => cuda_unary_special(input, op, GpuUnaryOp::Sign)?,
+            "sinc" => cuda_sinc_forward(input)?,
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op }),
+        };
+        Ok(Some(output))
+    })
+}
+
 // ===========================================================================
 // tan
 // ===========================================================================
@@ -1311,7 +1590,7 @@ impl<T: Float> GradFn<T> for TanBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad * (1 + tan(x)^2)` from
-            // the saved output via the named unsupported-CUDA VJP helper.
+            // the saved output via the named CUDA VJP helper.
             if self.output.is_cuda() || grad_output.is_cuda() {
                 Some(cuda_unary_vjp(grad_output, &self.output, "tan", |t| {
                     one + t * t
@@ -1346,6 +1625,14 @@ impl<T: Float> GradFn<T> for TanBackward<T> {
 /// Differentiable elementwise tangent: `c[i] = tan(x[i])`. Mirrors
 /// `aten/src/ATen/native/UnaryOps.cpp:360 CREATE_UNARY_TORCH_IMPL_FUNC(tan_out, tan_stub)`.
 pub fn tan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "tan")? {
+        return finish_unary_saving_output(output, input, |output| {
+            Ok(TanBackward {
+                input: input.clone(),
+                output,
+            })
+        });
+    }
     let output = unary_map_named(input, "tan", |x| x.tan())?;
     finish_unary_saving_output(output, input, |output| {
         Ok(TanBackward {
@@ -1371,7 +1658,7 @@ impl<T: Float> GradFn<T> for AsinBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(1 - x^2)` via
-            // the named unsupported-CUDA VJP helper.
+            // the named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1408,6 +1695,13 @@ impl<T: Float> GradFn<T> for AsinBackward<T> {
 /// Differentiable elementwise arcsine. Mirrors
 /// `UnaryOps.cpp:323 CREATE_UNARY_TORCH_IMPL_FUNC(asin_out, asin_stub)`.
 pub fn asin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "asin")? {
+        return finish_unary(output, input, || {
+            Ok(AsinBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "asin", |x| x.asin())?;
     finish_unary(output, input, || {
         Ok(AsinBackward {
@@ -1428,7 +1722,7 @@ impl<T: Float> GradFn<T> for AcosBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = -grad / sqrt(1 - x^2)` via
-            // the named unsupported-CUDA VJP helper.
+            // the named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1465,6 +1759,13 @@ impl<T: Float> GradFn<T> for AcosBackward<T> {
 /// Differentiable elementwise arccosine. Mirrors
 /// `UnaryOps.cpp:321 CREATE_UNARY_TORCH_IMPL_FUNC(acos_out, acos_stub)`.
 pub fn acos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "acos")? {
+        return finish_unary(output, input, || {
+            Ok(AcosBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "acos", |x| x.acos())?;
     finish_unary(output, input, || {
         Ok(AcosBackward {
@@ -1485,7 +1786,7 @@ impl<T: Float> GradFn<T> for AtanBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / (1 + x^2)` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1522,6 +1823,13 @@ impl<T: Float> GradFn<T> for AtanBackward<T> {
 /// Differentiable elementwise arctangent. Mirrors
 /// `UnaryOps.cpp:325 CREATE_UNARY_TORCH_IMPL_FUNC(atan_out, atan_stub)`.
 pub fn atan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "atan")? {
+        return finish_unary(output, input, || {
+            Ok(AtanBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "atan", |x| x.atan())?;
     finish_unary(output, input, || {
         Ok(AtanBackward {
@@ -1545,7 +1853,7 @@ impl<T: Float> GradFn<T> for SinhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
             // CUDA path (#1743 / CORE-049): `dx = grad * cosh(x)` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1582,6 +1890,13 @@ impl<T: Float> GradFn<T> for SinhBackward<T> {
 /// Differentiable elementwise hyperbolic sine. Mirrors
 /// `UnaryOps.cpp:351 CREATE_UNARY_TORCH_IMPL_FUNC(sinh_out, sinh_stub)`.
 pub fn sinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "sinh")? {
+        return finish_unary(output, input, || {
+            Ok(SinhBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "sinh", |x| x.sinh())?;
     finish_unary(output, input, || {
         Ok(SinhBackward {
@@ -1601,7 +1916,7 @@ impl<T: Float> GradFn<T> for CoshBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
             // CUDA path (#1743 / CORE-049): `dx = grad * sinh(x)` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1638,6 +1953,13 @@ impl<T: Float> GradFn<T> for CoshBackward<T> {
 /// Differentiable elementwise hyperbolic cosine. Mirrors
 /// `UnaryOps.cpp:329 CREATE_UNARY_TORCH_IMPL_FUNC(cosh_out, cosh_stub)`.
 pub fn cosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "cosh")? {
+        return finish_unary(output, input, || {
+            Ok(CoshBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "cosh", |x| x.cosh())?;
     finish_unary(output, input, || {
         Ok(CoshBackward {
@@ -1662,7 +1984,7 @@ impl<T: Float> GradFn<T> for AsinhBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(x^2 + 1)` via
-            // the named unsupported-CUDA VJP helper.
+            // the named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1699,6 +2021,13 @@ impl<T: Float> GradFn<T> for AsinhBackward<T> {
 /// Differentiable elementwise inverse hyperbolic sine. Mirrors
 /// `UnaryOps.cpp:324 CREATE_UNARY_TORCH_IMPL_FUNC(asinh_out, asinh_stub)`.
 pub fn asinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "asinh")? {
+        return finish_unary(output, input, || {
+            Ok(AsinhBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "asinh", |x| x.asinh())?;
     finish_unary(output, input, || {
         Ok(AsinhBackward {
@@ -1719,7 +2048,7 @@ impl<T: Float> GradFn<T> for AcoshBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(x^2 - 1)` via
-            // the named unsupported-CUDA VJP helper.
+            // the named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1756,6 +2085,13 @@ impl<T: Float> GradFn<T> for AcoshBackward<T> {
 /// Differentiable elementwise inverse hyperbolic cosine. Mirrors
 /// `UnaryOps.cpp:322 CREATE_UNARY_TORCH_IMPL_FUNC(acosh_out, acosh_stub)`.
 pub fn acosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "acosh")? {
+        return finish_unary(output, input, || {
+            Ok(AcoshBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "acosh", |x| x.acosh())?;
     finish_unary(output, input, || {
         Ok(AcoshBackward {
@@ -1776,7 +2112,7 @@ impl<T: Float> GradFn<T> for AtanhBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / (1 - x^2)` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1813,6 +2149,13 @@ impl<T: Float> GradFn<T> for AtanhBackward<T> {
 /// Differentiable elementwise inverse hyperbolic tangent. Mirrors
 /// `UnaryOps.cpp:326 CREATE_UNARY_TORCH_IMPL_FUNC(atanh_out, atanh_stub)`.
 pub fn atanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "atanh")? {
+        return finish_unary(output, input, || {
+            Ok(AtanhBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "atanh", |x| x.atanh())?;
     finish_unary(output, input, || {
         Ok(AtanhBackward {
@@ -1840,7 +2183,7 @@ impl<T: Float> GradFn<T> for Exp2Backward<T> {
             // M_LN2 = ln(2). Convert at runtime so we honor the generic T.
             let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
             // CUDA path (#1743 / CORE-049): `dx = grad * result * ln(2)` from
-            // the saved output via the named unsupported-CUDA VJP helper.
+            // the saved output via the named CUDA VJP helper.
             if self.output.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1877,6 +2220,14 @@ impl<T: Float> GradFn<T> for Exp2Backward<T> {
 /// Differentiable elementwise base-2 exponential: `c[i] = 2^x[i]`. Mirrors
 /// `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
 pub fn exp2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "exp2")? {
+        return finish_unary_saving_output(output, input, |output| {
+            Ok(Exp2Backward {
+                input: input.clone(),
+                output,
+            })
+        });
+    }
     let output = unary_map_named(input, "exp2", |x| x.exp2())?;
     finish_unary_saving_output(output, input, |output| {
         Ok(Exp2Backward {
@@ -1899,7 +2250,7 @@ impl<T: Float> GradFn<T> for Expm1Backward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad * (result + 1)` from
-            // the saved output via the named unsupported-CUDA VJP helper.
+            // the saved output via the named CUDA VJP helper.
             if self.output.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1936,6 +2287,14 @@ impl<T: Float> GradFn<T> for Expm1Backward<T> {
 /// Differentiable elementwise `exp(x) - 1` numerically stable for small `x`.
 /// Mirrors `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)`.
 pub fn expm1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "expm1")? {
+        return finish_unary_saving_output(output, input, |output| {
+            Ok(Expm1Backward {
+                input: input.clone(),
+                output,
+            })
+        });
+    }
     let output = unary_map_named(input, "expm1", |x| x.exp_m1())?;
     finish_unary_saving_output(output, input, |output| {
         Ok(Expm1Backward {
@@ -1962,7 +2321,7 @@ impl<T: Float> GradFn<T> for Log2Backward<T> {
             let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / (x * ln(2))` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -1999,6 +2358,13 @@ impl<T: Float> GradFn<T> for Log2Backward<T> {
 /// Differentiable elementwise base-2 logarithm. Mirrors
 /// `UnaryOps.cpp:343 CREATE_UNARY_TORCH_IMPL_FUNC(log2_out, log2_stub)`.
 pub fn log2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "log2")? {
+        return finish_unary(output, input, || {
+            Ok(Log2Backward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "log2", |x| x.log2())?;
     finish_unary(output, input, || {
         Ok(Log2Backward {
@@ -2021,7 +2387,7 @@ impl<T: Float> GradFn<T> for Log10Backward<T> {
                 T::from(std::f64::consts::LN_10).unwrap_or_else(<T as num_traits::Zero>::zero);
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / (x * ln(10))` via
-            // the named unsupported-CUDA VJP helper.
+            // the named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -2058,6 +2424,13 @@ impl<T: Float> GradFn<T> for Log10Backward<T> {
 /// Differentiable elementwise base-10 logarithm. Mirrors
 /// `UnaryOps.cpp:341 CREATE_UNARY_TORCH_IMPL_FUNC(log10_out, log10_stub)`.
 pub fn log10<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "log10")? {
+        return finish_unary(output, input, || {
+            Ok(Log10Backward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "log10", |x| x.log10())?;
     finish_unary(output, input, || {
         Ok(Log10Backward {
@@ -2078,7 +2451,7 @@ impl<T: Float> GradFn<T> for Log1pBackward<T> {
         let da = if self.input.requires_grad() {
             let one = <T as num_traits::One>::one();
             // CUDA path (#1743 / CORE-049): `dx = grad / (1 + x)` via the
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -2115,6 +2488,13 @@ impl<T: Float> GradFn<T> for Log1pBackward<T> {
 /// Differentiable elementwise `ln(1 + x)` numerically stable for small `x`.
 /// Mirrors `UnaryOps.cpp:342 CREATE_UNARY_TORCH_IMPL_FUNC(log1p_out, log1p_stub)`.
 pub fn log1p<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "log1p")? {
+        return finish_unary(output, input, || {
+            Ok(Log1pBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let output = unary_map_named(input, "log1p", |x| x.ln_1p())?;
     finish_unary(output, input, || {
         Ok(Log1pBackward {
@@ -2158,6 +2538,14 @@ impl<T: Float> GradFn<T> for ZerosLikeBackward<T> {
 /// `UnaryOps.cpp:316 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(ceil_out, ceil_stub)`.
 /// Backward: `zeros_like(grad)` (gradient is zero a.e.).
 pub fn ceil<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "ceil")? {
+        return finish_unary(output, input, || {
+            Ok(ZerosLikeBackward {
+                input: input.clone(),
+                name: "CeilBackward",
+            })
+        });
+    }
     let output = unary_map_named(input, "ceil", |x| x.ceil())?;
     finish_unary(output, input, || {
         Ok(ZerosLikeBackward {
@@ -2170,6 +2558,14 @@ pub fn ceil<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Differentiable elementwise floor. Mirrors
 /// `UnaryOps.cpp:317 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(floor_out, floor_stub)`.
 pub fn floor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "floor")? {
+        return finish_unary(output, input, || {
+            Ok(ZerosLikeBackward {
+                input: input.clone(),
+                name: "FloorBackward",
+            })
+        });
+    }
     let output = unary_map_named(input, "floor", |x| x.floor())?;
     finish_unary(output, input, || {
         Ok(ZerosLikeBackward {
@@ -2187,6 +2583,14 @@ pub fn floor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// upstream's round-half-to-even (RNE) we manually inspect the half-case
 /// and break ties toward even.
 pub fn round<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "round")? {
+        return finish_unary(output, input, || {
+            Ok(ZerosLikeBackward {
+                input: input.clone(),
+                name: "RoundBackward",
+            })
+        });
+    }
     let output = unary_map_named(input, "round", round_half_to_even)?;
     finish_unary(output, input, || {
         Ok(ZerosLikeBackward {
@@ -2225,6 +2629,14 @@ fn round_half_to_even<T: Float>(x: T) -> T {
 /// Differentiable elementwise truncation (round toward zero). Mirrors
 /// `UnaryOps.cpp:319 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(trunc_out, trunc_stub)`.
 pub fn trunc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "trunc")? {
+        return finish_unary(output, input, || {
+            Ok(ZerosLikeBackward {
+                input: input.clone(),
+                name: "TruncBackward",
+            })
+        });
+    }
     let output = unary_map_named(input, "trunc", |x| x.trunc())?;
     finish_unary(output, input, || {
         Ok(ZerosLikeBackward {
@@ -2282,6 +2694,13 @@ impl<T: Float> GradFn<T> for FracBackward<T> {
 /// Differentiable elementwise fractional part: `c[i] = x[i] - trunc(x[i])`.
 /// Mirrors `UnaryOps.cpp:337 CREATE_UNARY_TORCH_IMPL_FUNC(frac_out, frac_stub)`.
 pub fn frac<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "frac")? {
+        return finish_unary(output, input, || {
+            Ok(FracBackward {
+                input: input.clone(),
+            })
+        });
+    }
     let output = unary_map_named(input, "frac", |x| x - x.trunc())?;
     finish_unary(output, input, || {
         Ok(FracBackward {
@@ -2306,6 +2725,14 @@ pub fn frac<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// `torch.sign`, not `torch.sgn`; `sgn` (a complex-aware variant) DOES
 /// propagate NaN, but the two ops are deliberately distinct upstream.
 pub fn sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "sign")? {
+        return finish_unary(output, input, || {
+            Ok(ZerosLikeBackward {
+                input: input.clone(),
+                name: "SignBackward",
+            })
+        });
+    }
     let zero = <T as num_traits::Zero>::zero();
     let output = unary_map_named(input, "sign", |x| {
         if x.is_nan() || x == zero {
@@ -2344,7 +2771,7 @@ impl<T: Float> GradFn<T> for SincBackward<T> {
             let zero = <T as num_traits::Zero>::zero();
             // CUDA path (#1743 / CORE-049): closed-form `sinc'(x)` (with the
             // `sinc'(0) = 0` continuous extension) via the documented
-            // named unsupported-CUDA VJP helper.
+            // named CUDA VJP helper.
             if self.input.is_cuda() || grad_output.is_cuda() {
                 return Ok(vec![Some(cuda_unary_vjp(
                     grad_output,
@@ -2397,6 +2824,13 @@ impl<T: Float> GradFn<T> for SincBackward<T> {
 /// `UnaryOps.cpp:350 CREATE_UNARY_TORCH_IMPL_FUNC(sinc_out, sinc_stub)`
 /// (kernel at `aten/src/ATen/native/cpu/UnaryOpsKernel.cpp` `sinc_kernel`).
 pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = cuda_forward_named(input, "sinc")? {
+        return finish_unary(output, input, || {
+            Ok(SincBackward {
+                input: input.saved_for_backward()?,
+            })
+        });
+    }
     let pi = T::from(std::f64::consts::PI).unwrap_or_else(<T as num_traits::Zero>::zero);
     let zero = <T as num_traits::Zero>::zero();
     let one = <T as num_traits::One>::one();

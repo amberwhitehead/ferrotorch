@@ -32,7 +32,9 @@ use std::sync::{Arc, OnceLock};
 
 use ferrotorch_core::dtype::DType;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle, GpuRngState, GpuScatterReduce};
+use ferrotorch_core::gpu_dispatch::{
+    GpuBackend, GpuBufferHandle, GpuRngState, GpuScatterReduce, GpuUnaryOp,
+};
 
 use crate::buffer::CudaBuffer;
 #[cfg(all(feature = "cuda", feature = "cusparselt"))]
@@ -2014,6 +2016,18 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn unary_special_f32(
+        &self,
+        a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::transcendental::gpu_unary_special_f32(a_buf, op, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
     // -----------------------------------------------------------------------
     // f64 elementwise ops
     // -----------------------------------------------------------------------
@@ -2222,6 +2236,18 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_tanh_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn unary_special_f64(
+        &self,
+        a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::transcendental::gpu_unary_special_f64(a_buf, op, dev)
+            .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -9525,6 +9551,22 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn gelu_tanh_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_gelu_tanh_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gelu_sigmoid_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_gelu_sigmoid_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn silu_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -10055,6 +10097,19 @@ impl GpuBackend for CudaBackendImpl {
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::bf16::gpu_sqrt_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn unary_special_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::transcendental::gpu_unary_special_bf16(buf, op, dev)
+            .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 
@@ -10613,6 +10668,19 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn unary_special_f16(
+        &self,
+        a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::transcendental::gpu_unary_special_f16(buf, op, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn pow_f16(&self, a: &GpuBufferHandle, exponent: f32) -> FerrotorchResult<GpuBufferHandle> {
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -10671,6 +10739,22 @@ impl GpuBackend for CudaBackendImpl {
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_gelu_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gelu_tanh_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_gelu_tanh_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gelu_sigmoid_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_gelu_sigmoid_f16(buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }
 

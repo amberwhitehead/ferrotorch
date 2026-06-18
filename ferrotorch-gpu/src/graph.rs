@@ -8,18 +8,19 @@
 //! # Usage
 //!
 //! ```ignore
-//! use ferrotorch_gpu::graph::{DeviceScalar, begin_capture, end_capture};
+//! use ferrotorch_gpu::graph::{CaptureMode, DeviceScalar, begin_capture_with_mode, end_capture};
 //!
 //! // Pre-allocate all buffers BEFORE capture
 //! let mut out = alloc_zeros_f32(768, &device)?;
 //!
 //! // Parameters that change between replays go in DeviceScalar
-//! let mut pos = DeviceScalar::new(device.stream(), 0u32)?;
+//! let capture_device = GpuDevice::fork_for_capture(&device)?;
+//! let mut pos = DeviceScalar::new(capture_device.default_stream(), 0u32)?;
 //!
 //! // Capture
-//! begin_capture(device.stream())?;
-//! gpu_add_into(&a, &b, &mut out, &device)?;  // recorded, not executed
-//! let graph = end_capture(device.stream())?;
+//! begin_capture_with_mode(capture_device.default_stream(), CaptureMode::ThreadLocal)?;
+//! gpu_add_into(&a, &b, &mut out, &capture_device)?;  // recorded, not executed
+//! let graph = end_capture(capture_device.default_stream())?;
 //!
 //! // Replay loop
 //! for i in 0..100 {
@@ -291,23 +292,22 @@ impl Drop for MemPoolScope<'_> {
 /// Selects how CUDA graph capture serializes interactions with other
 /// threads. Mirrors `cudaStreamCaptureMode`.
 ///
-/// - `Global` — any CUDA API call from any thread that touches the
-///   capturing stream (or any thread that is also capturing) will
-///   invalidate capture. Safest for debugging; matches PyTorch's
-///   default.
+/// - `Global` — any unsafe CUDA API call from any thread is treated as
+///   capture-invalidating. This matches PyTorch's default
+///   `torch.cuda.graph(..., capture_error_mode="global")` /
+///   `at::cuda::CUDAGraph::capture_begin` behavior.
 /// - `ThreadLocal` — only calls from the capturing thread can
 ///   invalidate capture. Other threads may freely use unrelated
-///   streams. This is what ferrotorch-gpu has always used.
+///   streams.
 /// - `Relaxed` — the driver does not track cross-thread interactions
 ///   at all. Fastest, but the caller is fully responsible for making
 ///   sure no other thread interferes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CaptureMode {
     /// Global serialization (`CU_STREAM_CAPTURE_MODE_GLOBAL`).
+    #[default]
     Global,
     /// Thread-local serialization (`CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`).
-    /// This is the default in PyTorch's `cuda.graph` context.
-    #[default]
     ThreadLocal,
     /// Relaxed — no cross-thread serialization
     /// (`CU_STREAM_CAPTURE_MODE_RELAXED`).
@@ -539,9 +539,10 @@ pub fn begin_capture(stream: &Arc<CudaStream>) -> GpuResult<()> {
 
 /// Begin CUDA graph capture with an explicit [`CaptureMode`]. CL-454.
 ///
-/// Prefer [`begin_capture`] for the default (`ThreadLocal`) mode. Use
-/// this form when you need `Global` (debugging / strict serialization)
-/// or `Relaxed` (max throughput, single-thread ownership).
+/// Prefer [`begin_capture`] for PyTorch-equivalent default (`Global`)
+/// mode. Use this form when you need `ThreadLocal` for parallel test
+/// execution or `Relaxed` for a single-threaded capture owner that
+/// manually controls cross-stream dependencies.
 #[cfg(feature = "cuda")]
 pub fn begin_capture_with_mode(stream: &Arc<CudaStream>, mode: CaptureMode) -> GpuResult<()> {
     stream.begin_capture(mode.to_cuda())?;
@@ -736,9 +737,10 @@ impl Drop for EventTrackingRestore {
 /// RAII guard that runs CUDA graph capture in a scoped block.
 ///
 /// Call [`GraphCaptureGuard::begin`] (or [`Self::begin_with_mode`] /
-/// [`Self::begin_with_pool`]) to start capture; calling [`Self::finish`]
-/// returns the instantiated graph. If the guard is dropped without calling
-/// `finish` (for example because a kernel returned an error
+/// [`Self::begin_with_pool`] / [`Self::begin_with_pool_mode`]) to start
+/// capture; calling [`Self::finish`] returns the instantiated graph. If
+/// the guard is dropped without calling `finish` (for example because a
+/// kernel returned an error
 /// mid-capture), its `Drop` impl best-effort-ends capture and
 /// discards the resulting graph so the stream returns to a usable
 /// state. CL-454.
@@ -769,8 +771,8 @@ pub struct GraphCaptureGuard {
 
 #[cfg(feature = "cuda")]
 impl GraphCaptureGuard {
-    /// Begin graph capture on `stream` in the default
-    /// [`CaptureMode::ThreadLocal`] mode. CL-454.
+    /// Begin graph capture on `stream` in the PyTorch-equivalent default
+    /// [`CaptureMode::Global`] mode. CL-454.
     pub fn begin(stream: &Arc<CudaStream>) -> GpuResult<Self> {
         Self::begin_with_mode(stream, CaptureMode::default())
     }
@@ -788,7 +790,19 @@ impl GraphCaptureGuard {
     /// Begin graph capture bound to a [`CapturePool`]. The pool is
     /// attached to the resulting graph by [`Self::finish`]. CL-454.
     pub fn begin_with_pool(stream: &Arc<CudaStream>, pool: Arc<CapturePool>) -> GpuResult<Self> {
-        begin_capture_with_pool(&pool, stream)?;
+        Self::begin_with_pool_mode(stream, pool, CaptureMode::default())
+    }
+
+    /// Begin graph capture bound to a [`CapturePool`] with an explicit
+    /// [`CaptureMode`]. Mirrors PyTorch's `capture_error_mode` argument
+    /// for callers that need `thread_local` or `relaxed` behavior with a
+    /// pool-backed graph.
+    pub fn begin_with_pool_mode(
+        stream: &Arc<CudaStream>,
+        pool: Arc<CapturePool>,
+        mode: CaptureMode,
+    ) -> GpuResult<Self> {
+        begin_capture_with_pool_mode(&pool, stream, mode)?;
         Ok(Self {
             stream: Arc::clone(stream),
             pool: Some(pool),
@@ -1146,16 +1160,11 @@ pub fn begin_capture_with_pool(pool: &CapturePool, stream: &Arc<CudaStream>) -> 
 
 /// Like [`begin_capture_with_pool`] but with an explicit [`CaptureMode`].
 ///
-/// A production decode capture that spans cuBLAS handles and a forked
-/// capture stream needs [`CaptureMode::Relaxed`]: `ThreadLocal` (the
-/// default) raises `CUDA_ERROR_STREAM_CAPTURE_ISOLATION` when the captured
-/// stream has a dependency on uncaptured work from the parent stream (the
-/// fork point + lazily-initialised cuBLAS workspace). `Relaxed` disables
-/// that cross-stream isolation tracking — the caller takes responsibility
-/// for not racing the captured stream, which the single-threaded decode
-/// loop trivially satisfies. PyTorch reaches for the equally-permissive
-/// `cudaStreamCaptureModeGlobal` here for the same reason
-/// (`aten/src/ATen/cuda/CUDAGraph.cpp:154`). #1595.
+/// PyTorch exposes the same choice as `capture_error_mode` (`global`,
+/// `thread_local`, `relaxed`). ferrotorch defaults to `Global` for
+/// parity, while production decode capture can explicitly request
+/// [`CaptureMode::Relaxed`] when it owns the capture stream and has
+/// already made all cross-stream dependencies explicit. #1595.
 #[cfg(feature = "cuda")]
 pub fn begin_capture_with_pool_mode(
     pool: &CapturePool,
@@ -1394,6 +1403,14 @@ impl GraphCaptureGuard {
         Err(GpuError::NoCudaFeature)
     }
 
+    pub fn begin_with_pool_mode<T>(
+        _stream: &T,
+        _pool: std::sync::Arc<CapturePool>,
+        _mode: CaptureMode,
+    ) -> GpuResult<Self> {
+        Err(GpuError::NoCudaFeature)
+    }
+
     pub fn finish(self) -> GpuResult<CapturedGraph> {
         match self._never {}
     }
@@ -1522,8 +1539,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn capture_mode_default_is_thread_local() {
-        assert_eq!(CaptureMode::default(), CaptureMode::ThreadLocal);
+    fn capture_mode_default_is_global_like_pytorch() {
+        assert_eq!(CaptureMode::default(), CaptureMode::Global);
     }
 
     #[test]

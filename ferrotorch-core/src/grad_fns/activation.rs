@@ -890,17 +890,20 @@ pub fn relu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn relu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
         // buffer before the elementwise kernel reads element 0.
         let input = input.contiguous()?;
-        let handle = if is_f32::<T>() {
-            backend.relu_f32(input.gpu_handle()?)?
-        } else {
-            backend.relu_f64(input.gpu_handle()?)?
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "relu",
+            f32 => backend.relu_f32(input.gpu_handle()?),
+            f64 => backend.relu_f64(input.gpu_handle()?),
+            bf16 => backend.relu_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.relu_f16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
@@ -1057,27 +1060,38 @@ pub fn gelu_with<T: Float>(
     })? {
         return Ok(out);
     }
-    // GPU fast path for all approximation modes (f32/f64).
+    // GPU fast path for all approximation modes and floating dtypes.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
+        && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
         // buffer before the elementwise kernel reads element 0.
         let input = input.contiguous()?;
-        let handle = if is_f32::<T>() {
-            match approximate {
-                GeluApproximate::Sigmoid => backend.gelu_f32(input.gpu_handle()?)?,
-                GeluApproximate::Tanh => backend.gelu_tanh_f32(input.gpu_handle()?)?,
-                GeluApproximate::None => backend.gelu_erf_f32(input.gpu_handle()?)?,
-            }
-        } else {
-            match approximate {
-                GeluApproximate::Sigmoid => backend.gelu_f64(input.gpu_handle()?)?,
-                GeluApproximate::Tanh => backend.gelu_tanh_f64(input.gpu_handle()?)?,
-                GeluApproximate::None => backend.gelu_erf_f64(input.gpu_handle()?)?,
-            }
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "gelu",
+            f32 => match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_f32(input.gpu_handle()?),
+                GeluApproximate::Tanh => backend.gelu_tanh_f32(input.gpu_handle()?),
+                GeluApproximate::None => backend.gelu_erf_f32(input.gpu_handle()?),
+            },
+            f64 => match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_f64(input.gpu_handle()?),
+                GeluApproximate::Tanh => backend.gelu_tanh_f64(input.gpu_handle()?),
+                GeluApproximate::None => backend.gelu_erf_f64(input.gpu_handle()?),
+            },
+            bf16 => match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_sigmoid_bf16_bf16(input.gpu_handle()?),
+                GeluApproximate::Tanh => backend.gelu_tanh_bf16_bf16(input.gpu_handle()?),
+                GeluApproximate::None => backend.gelu_bf16_bf16(input.gpu_handle()?),
+            },
+            f16 => match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_sigmoid_f16(input.gpu_handle()?),
+                GeluApproximate::Tanh => backend.gelu_tanh_f16(input.gpu_handle()?),
+                GeluApproximate::None => backend.gelu_f16(input.gpu_handle()?),
+            },
+        )?;
         return if is_grad_enabled() && input.requires_grad() {
             Tensor::from_operation(
                 TensorStorage::gpu(handle),
@@ -1151,19 +1165,22 @@ pub fn silu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn silu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    // GPU fast path for f32/f64
+    // GPU fast path for all floating dtypes with resident CUDA kernels.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
+        && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
         // buffer before the elementwise kernel reads element 0.
         let input = input.contiguous()?;
-        let handle = if is_f32::<T>() {
-            backend.silu_f32(input.gpu_handle()?)?
-        } else {
-            backend.silu_f64(input.gpu_handle()?)?
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "silu",
+            f32 => backend.silu_f32(input.gpu_handle()?),
+            f64 => backend.silu_f64(input.gpu_handle()?),
+            bf16 => backend.silu_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.silu_f16(input.gpu_handle()?),
+        )?;
         return if is_grad_enabled() && input.requires_grad() {
             Tensor::from_operation(
                 TensorStorage::gpu(handle),

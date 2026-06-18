@@ -196,7 +196,7 @@ use ferrotorch_core::dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel}
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::gpu_dispatch::{
-    GpuBufferHandle, GpuRngState, GpuScatterReduce, gpu_backend, has_gpu_backend,
+    GpuBufferHandle, GpuRngState, GpuScatterReduce, GpuUnaryOp, gpu_backend, has_gpu_backend,
 };
 use ferrotorch_core::meta_propagate;
 use ferrotorch_core::named_tensor::NamedTensor;
@@ -1625,6 +1625,23 @@ fn gpu_scatter_reduce_abi_tags_match_kernel_contract() {
     assert_eq!(GpuScatterReduce::Prod.as_u32(), 1);
     assert_eq!(GpuScatterReduce::Amax.as_u32(), 2);
     assert_eq!(GpuScatterReduce::Amin.as_u32(), 3);
+}
+
+#[test]
+fn gpu_unary_op_suffixes_match_kernel_contract() {
+    let cases = [
+        (GpuUnaryOp::Atan, "atan"),
+        (GpuUnaryOp::Ceil, "ceil"),
+        (GpuUnaryOp::Floor, "floor"),
+        (GpuUnaryOp::Round, "round"),
+        (GpuUnaryOp::Trunc, "trunc"),
+        (GpuUnaryOp::Frac, "frac"),
+        (GpuUnaryOp::Sign, "sign"),
+    ];
+
+    for (op, suffix) in cases {
+        assert_eq!(op.suffix(), suffix);
+    }
 }
 
 #[test]

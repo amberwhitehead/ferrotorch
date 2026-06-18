@@ -28,6 +28,7 @@ use ferrotorch_core::Tensor;
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::error::FerrotorchError;
+use ferrotorch_core::grad_fns::activation::GeluApproximate;
 
 static GPU_INIT: Once = Once::new();
 
@@ -275,6 +276,58 @@ fn f16_op_sweep_gpu() {
         let r = a_src.iter().map(|x| x.sqrt()).collect();
         Ok((out, r))
     }));
+    results.push(run("atan", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::atan(&a)?;
+        let r = signed_src.iter().map(|x| x.atan()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("ceil", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::ceil(&a)?;
+        let r = signed_src.iter().map(|x| x.ceil()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("floor", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::floor(&a)?;
+        let r = signed_src.iter().map(|x| x.floor()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("round", || {
+        let src = [-2.5, -1.5, -0.5, -0.0, 0.0, 0.5, 1.5, 2.5, f32::NAN];
+        let a = f16_cuda(&src, &[src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::round(&a)?;
+        let r = src.iter().copied().map(round_ties_even).collect();
+        Ok((out, r))
+    }));
+    results.push(run("trunc", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::trunc(&a)?;
+        let r = signed_src.iter().map(|x| x.trunc()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("frac", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::frac(&a)?;
+        let r = signed_src.iter().map(|x| x - x.trunc()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("sign", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::transcendental::sign(&a)?;
+        let r = signed_src
+            .iter()
+            .map(|&x| {
+                if x.is_nan() || x == 0.0 {
+                    0.0
+                } else {
+                    x.signum()
+                }
+            })
+            .collect();
+        Ok((out, r))
+    }));
     results.push(run("tanh", || {
         let a = f16_cuda(&a_src, &[n]);
         let out = ferrotorch_core::grad_fns::activation::tanh(&a)?;
@@ -301,6 +354,25 @@ fn f16_op_sweep_gpu() {
         let r = a_src
             .iter()
             .map(|x| 0.5 * x * (1.0 + libm_erf(x / 2.0_f32.sqrt())))
+            .collect();
+        Ok((out, r))
+    }));
+    results.push(run("gelu_tanh", || {
+        let a = f16_cuda(&a_src, &[n]);
+        let out = ferrotorch_core::grad_fns::activation::gelu_with(&a, GeluApproximate::Tanh)?;
+        let sqrt_2_over_pi = (2.0_f32 / std::f32::consts::PI).sqrt();
+        let r = a_src
+            .iter()
+            .map(|x| 0.5 * x * (1.0 + (sqrt_2_over_pi * (x + 0.044715 * x * x * x)).tanh()))
+            .collect();
+        Ok((out, r))
+    }));
+    results.push(run("gelu_sigmoid", || {
+        let a = f16_cuda(&a_src, &[n]);
+        let out = ferrotorch_core::grad_fns::activation::gelu_with(&a, GeluApproximate::Sigmoid)?;
+        let r = a_src
+            .iter()
+            .map(|x| x / (1.0 + (-1.702 * x).exp()))
             .collect();
         Ok((out, r))
     }));
@@ -382,4 +454,21 @@ fn libm_erf(x: f32) -> f32 {
             * t
             * (-x * x).exp();
     (sign * y) as f32
+}
+
+fn round_ties_even(x: f32) -> f32 {
+    if !x.is_finite() {
+        return x;
+    }
+    let lo = x.floor();
+    let frac = x - lo;
+    if frac < 0.5 {
+        lo
+    } else if frac > 0.5 {
+        lo + 1.0
+    } else if (lo as i64) % 2 == 0 {
+        lo
+    } else {
+        lo + 1.0
+    }
 }

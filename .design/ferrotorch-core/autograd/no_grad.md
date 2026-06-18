@@ -42,9 +42,10 @@ context manager, eliminating the user-error of forgetting to call
 - REQ-5: `inference_mode<F, R>(f: F) -> R` enters inference mode —
   strictly stronger than `no_grad` because it sets `INFERENCE_MODE` as
   well as disabling grad. Mirrors `class inference_mode` at
-  `torch/autograd/grad_mode.py:213-323`. The `Tensor::from_operation`
-  path at `ferrotorch-core/src/tensor.rs:307` short-circuits its
-  grad-fn-attachment logic when `is_inference_mode()` returns true,
+  `torch/autograd/grad_mode.py:213-323`. The
+  `pub fn from_operation in ferrotorch-core/src/tensor.rs` path
+  short-circuits its grad-fn-attachment logic when
+  `is_inference_mode()` returns true,
   skipping all autograd bookkeeping.
 - REQ-6: `is_inference_mode() -> bool` reads the
   `INFERENCE_MODE` thread-local cell.
@@ -115,8 +116,8 @@ that captures both cells. Inside the scope, both `INFERENCE_MODE` is
 set true AND `GRAD_ENABLED` is set false — matching upstream's
 documented stronger-than-`no_grad` guarantee at
 `torch/autograd/grad_mode.py:213-280`. The non-test production consumer
-is `Tensor::from_operation` at `ferrotorch-core/src/tensor.rs:307`,
-which checks `is_inference_mode()` and skips all autograd metadata
+is `pub fn from_operation in ferrotorch-core/src/tensor.rs`, which
+checks `is_inference_mode()` and skips all autograd metadata
 allocation when true (a per-op fast-path saving ~80 bytes of allocation
 per tensor in pure-inference workloads).
 
@@ -161,5 +162,5 @@ All 14 tests pass in the workspace gauntlet.
 | REQ-2 | SHIPPED | impl: `pub fn no_grad<F, R>` at `no_grad in no_grad.rs` with `NoGradGuard` RAII drop at `no_grad in no_grad.rs`; mirrors `class no_grad` at `torch/autograd/grad_mode.py:22-86`; non-test production consumer: `no_grad in ferrotorch-core/src/grad_fns/transcendental.rs` (`use crate::autograd::no_grad::{is_grad_enabled, no_grad}`) and 20+ call sites in `torch in linalg.rs`, `torch in linalg.rs`, `no_grad in activation.rs` etc. — every grad_fn backward implementation runs its kernel call inside `no_grad(|| ...)` so the backward's intermediate tensors don't re-attach grad_fn nodes and double-count gradients. |
 | REQ-3 | SHIPPED | impl: `pub fn enable_grad<F, R>` at `no_grad.rs:79-96` with `EnableGradGuard` RAII at `:83-90`; mirrors `class enable_grad` at `torch/autograd/grad_mode.py:89-142`; non-test production consumer: re-exported through `ferrotorch-core/src/autograd/mod.rs:36` and `ferrotorch-core/src/lib.rs:125-127` for downstream use (gradient-checkpointing recompute path inside `no_grad` envelope; the test at `no_grad.rs:198-209` characterizes the use case). Note: this is an existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5 applies; the API surface itself is the production consumer for users of the autograd crate. |
 | REQ-4 | SHIPPED | impl: `pub fn set_grad_enabled(enabled: bool)` at `set_grad_enabled in no_grad.rs`; mirrors `class set_grad_enabled` at `torch/autograd/grad_mode.py:144-211` (exposed as a free function rather than a class per R-DEV-4 substitution); non-test production consumer: re-exported through `mod.rs` and `lib.rs` as the FFI-friendly imperative form. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-5 | SHIPPED | impl: `pub fn inference_mode<F, R>` at `no_grad.rs:134-155` with `InferenceModeGuard` RAII capturing both `prev_inference` and `prev_grad`; mirrors `class inference_mode` at `torch/autograd/grad_mode.py:213-323`; non-test production consumer: `ferrotorch-core/src/tensor.rs:307 if crate::autograd::no_grad::is_inference_mode() { ... }` short-circuits autograd-metadata allocation when inference mode is active. |
+| REQ-5 | SHIPPED | impl: `pub fn inference_mode<F, R>` at `no_grad.rs:134-155` with `InferenceModeGuard` RAII capturing both `prev_inference` and `prev_grad`; mirrors `class inference_mode` at `torch/autograd/grad_mode.py:213-323`; non-test production consumer: `pub fn from_operation in ferrotorch-core/src/tensor.rs` short-circuits autograd-metadata allocation when inference mode is active. |
 | REQ-6 | SHIPPED | impl: `pub fn is_inference_mode` at `is_inference_mode in no_grad.rs` reading `INFERENCE_MODE` thread-local at `INFERENCE_MODE in no_grad.rs`; mirrors `torch.is_inference_mode_enabled()`; non-test production consumer: `no_grad in ferrotorch-core/src/tensor.rs` (the predicate gating the inference-mode fast path described in REQ-5). |

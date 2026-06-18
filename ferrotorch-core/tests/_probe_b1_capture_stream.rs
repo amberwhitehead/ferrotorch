@@ -9,9 +9,9 @@
 //!   was contested and the capture was invalidated under parallel execution.
 //!
 //! AFTER fix: gpu_add_into_on_stream was added to allow callers to dispatch on an
-//!   explicit stream. The conformance test now captures on a dedicated non-default
-//!   stream with ThreadLocal mode. Parallel tests on device.stream() cannot invalidate
-//!   a ThreadLocal capture on a different stream.
+//!   explicit stream. API-surface capture tests use an explicit Relaxed mode on a
+//!   dedicated non-default stream so the PyTorch-equivalent Global default remains
+//!   available without making parallel test execution flaky.
 //!
 //! This probe verifies:
 //!   1. gpu_add_into_on_stream compiles and dispatches on the provided stream.
@@ -68,7 +68,9 @@ fn probe_b1_gpu_add_into_on_stream_dispatches() {
 fn probe_b1_captured_graph_api_surface() {
     ensure_cuda();
     use ferrotorch_gpu::device::GpuDevice;
-    use ferrotorch_gpu::graph::{CapturePool, begin_capture_with_pool, end_capture_with_pool};
+    use ferrotorch_gpu::graph::{
+        CaptureMode, CapturePool, begin_capture_with_pool_mode, end_capture_with_pool,
+    };
     use std::sync::Arc;
 
     // Serialize graph captures within this test binary.
@@ -80,15 +82,14 @@ fn probe_b1_captured_graph_api_surface() {
     let _lock = capture_lock();
 
     let dev = GpuDevice::new(0).expect("GpuDevice::new(0)");
-    // Dedicated stream with ThreadLocal capture mode (the default) so parallel
-    // tests on device.stream() cannot invalidate this capture.
+    // Dedicated stream with explicit Relaxed capture mode. CaptureMode::default()
+    // is Global to match PyTorch, but this API-surface probe intentionally
+    // avoids global cross-thread invalidation under the Rust test harness.
     let capture_stream = dev.context().new_stream().expect("new_stream");
 
     let pool = Arc::new(CapturePool::new());
-    // BEFORE fix: this would fail with CUDA_ERROR_STREAM_CAPTURE_INVALIDATED
-    // under parallel test execution because gpu_add_into ran on device.stream().
-    // AFTER fix: dedicated stream with ThreadLocal mode is safe under parallelism.
-    begin_capture_with_pool(&pool, &capture_stream).expect("begin_capture_with_pool");
+    begin_capture_with_pool_mode(&pool, &capture_stream, CaptureMode::Relaxed)
+        .expect("begin_capture_with_pool_mode");
     let graph =
         end_capture_with_pool(&capture_stream, Arc::clone(&pool)).expect("end_capture_with_pool");
 

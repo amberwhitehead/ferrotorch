@@ -78,12 +78,14 @@ helper is consumed by tensor construction and op-dispatch sites:
 - `c_contiguous_strides` (`shape.rs:97-111`) is the canonical strides
   constructor for every `Tensor::from_storage` /
   `Tensor::view_reshape` / `Tensor::from_operation` call site:
-  `tensor.rs:241`, `tensor.rs:292`, `tensor.rs:348`, `tensor.rs:495`,
-  `tensor.rs:2102`, `tensor.rs:2647`, plus `methods.rs:1271-1272` for
-  reduction-broadcast backwards.
+  `pub fn from_storage in ferrotorch-core/src/tensor.rs`,
+  `pub fn view_reshape in ferrotorch-core/src/tensor.rs`,
+  `pub fn from_operation in ferrotorch-core/src/tensor.rs`,
+  `pub unsafe fn update_storage_and_shape in ferrotorch-core/src/tensor.rs`,
+  and `fn materialize_format in ferrotorch-core/src/tensor.rs`.
 - `channels_last_strides` (`shape.rs:186-214`) and
   `channels_last_3d_strides` (`shape.rs:218-244`) are called by
-  `Tensor::materialize_format` (`tensor.rs:2627-2647`) to install the
+  `fn materialize_format in ferrotorch-core/src/tensor.rs` to install the
   NHWC / NDHWC stride pattern after a `to_memory_format` rearrange. The
   shape itself is unchanged — only strides shift, matching PyTorch's
   `Tensor.contiguous(memory_format=torch.channels_last)` semantics.
@@ -130,7 +132,7 @@ matches `c10::TensorImpl::compute_contiguous_strides` exactly.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `broadcast_shapes in ferrotorch-core/src/shape.rs` mirrors `infer_size_impl` in `aten/src/ATen/ExpandUtils.h`; non-test consumers: `broadcast_shapes in ferrotorch-core/src/meta_propagate.rs`, `broadcast_shapes in ferrotorch-core/src/ops/elementwise.rs`, `ferrotorch-core/src/lib.rs` (re-export consumed by downstream crates). |
 | REQ-2 | SHIPPED | impl: `numel` at `ferrotorch-core/src/shape.rs:52` mirrors `c10::multiply_integers(IntArrayRef)`; non-test consumer: every shape-derived numel computation; called indirectly via `Tensor::numel` at `ferrotorch-core/src/tensor.rs:641` which inlines the same product. |
-| REQ-3 | SHIPPED | impl: `c_contiguous_strides` at `ferrotorch-core/src/shape.rs:97` mirrors `c10::TensorImpl::set_sizes_contiguous` per `c10/core/TensorImpl.h`; non-test consumers: `ferrotorch-core/src/tensor.rs:241`, `:292`, `:348`, `:495`, `:2102`, `:2647`; `ferrotorch-core/src/methods.rs:1271`. |
-| REQ-4 | SHIPPED | impl: `channels_last_strides` at `ferrotorch-core/src/shape.rs:186` and `channels_last_3d_strides` at `:218` mirror `c10::get_channels_last_strides_2d` / `_3d` in `c10/core/MemoryFormat.h`; non-test consumer: `Tensor::materialize_format` at `ferrotorch-core/src/tensor.rs:2627-2647`. |
+| REQ-3 | SHIPPED | impl: `c_contiguous_strides` at `ferrotorch-core/src/shape.rs:97` mirrors `c10::TensorImpl::set_sizes_contiguous` per `c10/core/TensorImpl.h`; non-test consumers: `pub fn from_storage in ferrotorch-core/src/tensor.rs`, `pub fn view_reshape in ferrotorch-core/src/tensor.rs`, `pub fn from_operation in ferrotorch-core/src/tensor.rs`, `pub unsafe fn update_storage_and_shape in ferrotorch-core/src/tensor.rs`, and `fn materialize_format in ferrotorch-core/src/tensor.rs`. |
+| REQ-4 | SHIPPED | impl: `channels_last_strides` at `ferrotorch-core/src/shape.rs:186` and `channels_last_3d_strides` at `:218` mirror `c10::get_channels_last_strides_2d` / `_3d` in `c10/core/MemoryFormat.h`; non-test consumer: `fn materialize_format in ferrotorch-core/src/tensor.rs`. |
 | REQ-5 | SHIPPED | impl: `normalize_axis in ferrotorch-core/src/shape.rs` mirrors `c10::maybe_wrap_dim` in `c10/core/WrapDimMinimal.h`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs` and used by reduction grad_fns to accept negative dims. |
 | REQ-6 | SHIPPED | impl: `check_shapes_match` at `ferrotorch-core/src/shape.rs:263`; non-test consumer: the function is exported to the crate and called by shape-equality guards in op modules whose call sites it preconditions, e.g. inplace ops that require exact-shape inputs (no broadcasting). |

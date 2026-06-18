@@ -219,6 +219,7 @@ pub mod sparse;
 pub mod special;
 pub mod stream;
 pub mod tensor_bridge;
+pub mod transcendental;
 pub mod transfer;
 #[cfg(feature = "cuda")]
 pub mod triangular;

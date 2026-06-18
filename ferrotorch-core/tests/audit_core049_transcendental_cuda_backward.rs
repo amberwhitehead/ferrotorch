@@ -1,22 +1,19 @@
 //! Regression tests for audit finding CORE-049 (crosslink #1743).
 //!
-//! The unary transcendental family in `grad_fns/transcendental.rs` computes
-//! its CUDA forward through `unary_map` (documented host round trip, output
-//! restored to CUDA), but pre-fix the backwards of `tan asin acos atan sinh
-//! cosh asinh acosh atanh exp2 expm1 log2 log10 log1p frac sinc`
-//! unconditionally called the CPU-only `data()` on the saved tensors and the
-//! incoming gradient — so a successful CUDA forward was followed by a
-//! `GpuTensorNotAccessible` backward. The rounding/sign family (`ceil floor
-//! round trunc sign`) instead routed through `zeros_like_tensor`, which
-//! unconditionally created CPU storage — backward "succeeded" but silently
-//! delivered a CPU gradient for a CUDA leaf.
+//! The unary transcendental family in `grad_fns/transcendental.rs` used to
+//! enter CUDA forward paths but then fail or degrade during backward:
+//! `tan asin acos atan sinh cosh asinh acosh atanh exp2 expm1 log2 log10
+//! log1p frac sinc` unconditionally called the CPU-only `data()` on saved
+//! tensors and incoming gradients, so backward failed with
+//! `GpuTensorNotAccessible`. The rounding/sign family (`ceil floor round
+//! trunc sign`) routed through `zeros_like_tensor`, which unconditionally
+//! created CPU storage, so backward "succeeded" while silently delivering a
+//! CPU gradient for a CUDA leaf.
 //!
-//! Post-fix contract (the `leaky_relu`/CORE-045 house pattern at
-//! `activation.rs`): the backward builds the derivative factor via
-//! `unary_map` (documented host round trip per R-LOUD-2) on the saved
-//! input/output and combines it with `grad_output` using the CUDA-aware
-//! `grad_fns::arithmetic` ops; `zeros_like_tensor` preserves the saved
-//! input's device.
+//! Post-fix contract: CUDA forwards stay resident through backend kernels or
+//! CUDA-composed tensor expressions, CUDA backwards build derivative factors
+//! on device and combine them with `grad_output` through CUDA-aware arithmetic,
+//! and zero-gradient ops allocate zeros on the saved input's device.
 //!
 //! Every numerical expectation below is from a live torch session
 //! (R-ORACLE-1(b)):
@@ -105,10 +102,10 @@ fn read_back_f32(t: &Tensor<f32>, what: &str) -> Vec<f32> {
     t.cpu().expect("D2H readback").data_vec().expect("read")
 }
 
-/// f64 lane tolerance rationale (R-ORACLE-5): values transit one lossless
-/// f64 D2H/H2D round trip; each forward/backward evaluates at most two libm
-/// transcendentals on the host (≤ 1 ulp each ≈ 1.6e-15 relative at the max
-/// magnitude 7.39 = expm1'(2)). 1e-12 absolute gives > 2.5 orders of margin.
+/// f64 lane tolerance rationale (R-ORACLE-5): final assertions perform one
+/// D2H readback only after device residency has been asserted. The tested
+/// values are small-domain PyTorch oracle points; 1e-12 absolute tolerance is
+/// tight enough to reject wrong formulas while allowing CUDA/libm-level drift.
 const TOL_F64: f64 = 1e-12;
 
 /// f32 lane tolerance rationale (R-ORACLE-5): f32 eps = 1.19e-7; the largest
@@ -781,6 +778,157 @@ fn cuda_grad_nan_propagation_spot_checks() {
     // sign(NaN) = 0 (torch.sign CPU kernel semantics) and its grad is the
     // zeros_like backward — exactly 0.0, NOT NaN.
     nan_lane("sign", tr::sign, &[0.0, 1.0], &[0.0, 0.0]);
+}
+
+// ---------------------------------------------------------------------------
+// IEEE edge-case spot checks for CUDA unary-special kernels
+// ---------------------------------------------------------------------------
+
+/// Local PyTorch 2.11.0+cu130 oracle for
+/// `x = [nan, -0.0, 0.0, -2.5, -0.5, 0.5, 1.5, 2.5]` on CPU and CUDA:
+///
+/// ```text
+/// sign  -> [0, 0, 0, -1, -1, 1, 1, 1]
+/// round -> [nan, -0, 0, -2, -0, 0, 2, 2]
+/// frac  -> [nan, 0, 0, -0.5, -0.5, 0.5, 0.5, 0.5]
+/// ceil  -> [nan, -0, 0, -2, -0, 1, 2, 3]
+/// floor -> [nan, -0, 0, -3, -1, 0, 1, 2]
+/// trunc -> [nan, -0, 0, -2, -0, 0, 1, 2]
+/// atan([-0, 0]) -> [-0, 0]
+/// ```
+#[test]
+fn cuda_unary_special_ieee_edges_match_torch() {
+    ensure_cuda_backend();
+
+    fn assert_bits64(actual: &[f64], expected: &[f64], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            if e.is_nan() {
+                assert!(a.is_nan(), "{label}[{i}]: expected NaN, got {a}");
+            } else {
+                assert_eq!(
+                    a.to_bits(),
+                    e.to_bits(),
+                    "{label}[{i}]: actual={a:?} ({:#018x}) expected={e:?} ({:#018x})",
+                    a.to_bits(),
+                    e.to_bits()
+                );
+            }
+        }
+    }
+
+    fn assert_bits32(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            if e.is_nan() {
+                assert!(a.is_nan(), "{label}[{i}]: expected NaN, got {a}");
+            } else {
+                assert_eq!(
+                    a.to_bits(),
+                    e.to_bits(),
+                    "{label}[{i}]: actual={a:?} ({:#010x}) expected={e:?} ({:#010x})",
+                    a.to_bits(),
+                    e.to_bits()
+                );
+            }
+        }
+    }
+
+    let x64 = cuda_leaf_f64(&[f64::NAN, -0.0, 0.0, -2.5, -0.5, 0.5, 1.5, 2.5]);
+    let lanes64: [(&str, OpF64, &[f64]); 6] = [
+        (
+            "sign",
+            tr::sign,
+            &[0.0, 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        ),
+        (
+            "round",
+            tr::round,
+            &[f64::NAN, -0.0, 0.0, -2.0, -0.0, 0.0, 2.0, 2.0],
+        ),
+        (
+            "frac",
+            tr::frac,
+            &[f64::NAN, 0.0, 0.0, -0.5, -0.5, 0.5, 0.5, 0.5],
+        ),
+        (
+            "ceil",
+            tr::ceil,
+            &[f64::NAN, -0.0, 0.0, -2.0, -0.0, 1.0, 2.0, 3.0],
+        ),
+        (
+            "floor",
+            tr::floor,
+            &[f64::NAN, -0.0, 0.0, -3.0, -1.0, 0.0, 1.0, 2.0],
+        ),
+        (
+            "trunc",
+            tr::trunc,
+            &[f64::NAN, -0.0, 0.0, -2.0, -0.0, 0.0, 1.0, 2.0],
+        ),
+    ];
+    for (name, op, expected) in lanes64 {
+        let out = op(&x64).unwrap_or_else(|e| panic!("{name} f64 forward failed: {e:?}"));
+        assert_bits64(
+            &read_back_f64(&out, &format!("{name} f64 edge")),
+            expected,
+            name,
+        );
+    }
+    let atan64 = tr::atan(&cuda_leaf_f64(&[-0.0, 0.0])).expect("atan f64 zeros");
+    assert_bits64(
+        &read_back_f64(&atan64, "atan f64 signed zero edge"),
+        &[-0.0, 0.0],
+        "atan f64 zeros",
+    );
+
+    let x32 = cuda_leaf_f32(&[f32::NAN, -0.0, 0.0, -2.5, -0.5, 0.5, 1.5, 2.5]);
+    let lanes32: [(&str, OpF32, &[f32]); 6] = [
+        (
+            "sign",
+            tr::sign,
+            &[0.0, 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        ),
+        (
+            "round",
+            tr::round,
+            &[f32::NAN, -0.0, 0.0, -2.0, -0.0, 0.0, 2.0, 2.0],
+        ),
+        (
+            "frac",
+            tr::frac,
+            &[f32::NAN, 0.0, 0.0, -0.5, -0.5, 0.5, 0.5, 0.5],
+        ),
+        (
+            "ceil",
+            tr::ceil,
+            &[f32::NAN, -0.0, 0.0, -2.0, -0.0, 1.0, 2.0, 3.0],
+        ),
+        (
+            "floor",
+            tr::floor,
+            &[f32::NAN, -0.0, 0.0, -3.0, -1.0, 0.0, 1.0, 2.0],
+        ),
+        (
+            "trunc",
+            tr::trunc,
+            &[f32::NAN, -0.0, 0.0, -2.0, -0.0, 0.0, 1.0, 2.0],
+        ),
+    ];
+    for (name, op, expected) in lanes32 {
+        let out = op(&x32).unwrap_or_else(|e| panic!("{name} f32 forward failed: {e:?}"));
+        assert_bits32(
+            &read_back_f32(&out, &format!("{name} f32 edge")),
+            expected,
+            name,
+        );
+    }
+    let atan32 = tr::atan(&cuda_leaf_f32(&[-0.0, 0.0])).expect("atan f32 zeros");
+    assert_bits32(
+        &read_back_f32(&atan32, "atan f32 signed zero edge"),
+        &[-0.0, 0.0],
+        "atan f32 zeros",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -57,12 +57,11 @@ error. Used in tests of custom `GradFn` implementations.
 ## Acceptance Criteria
 
 - [x] AC-1: `gradcheck` of `sum(x * x)` w.r.t. `x` succeeds —
-  `test_gradcheck_sum_of_squares` at `gradcheck.rs:196-211`.
+  `fn test_gradcheck_sum_of_squares in ferrotorch-core/src/autograd/gradcheck.rs`.
 - [x] AC-2: `gradcheck` of `sum(a * b)` w.r.t. `[a, b]` (linear
-  combination) succeeds — `test_gradcheck_linear_combination` at
-  `gradcheck.rs:213-228`.
+  combination) succeeds — `fn test_gradcheck_linear_combination in ferrotorch-core/src/autograd/gradcheck.rs`.
 - [x] AC-3: `gradcheck` of `sum(a + b)` succeeds —
-  `test_gradcheck_add` at `gradcheck.rs:230-245`.
+  `fn test_gradcheck_add in ferrotorch-core/src/autograd/gradcheck.rs`.
 - [x] AC-4: Non-scalar function returns errors cleanly —
   `test_gradcheck_non_scalar_fails in gradcheck.rs`.
 
@@ -154,4 +153,4 @@ All 4 pass in the workspace gauntlet.
 | REQ-3 | SHIPPED | impl: scalar-output validation at `gradcheck in gradcheck.rs`; non-test consumer: inside REQ-1; tested by `test_gradcheck_non_scalar_fails in gradcheck.rs`. |
 | REQ-4 | SHIPPED | impl: central finite difference at `gradcheck.rs:88-181` (the perturb-plus / perturb-minus / divide-by-`2*eps` body); mirrors `_compute_numerical_gradient` at `torch/autograd/gradcheck.py:358+`; non-test consumer: inside REQ-1. |
 | REQ-5 | SHIPPED | impl: per-element mismatch error at `gradcheck.rs:159-180`; non-test consumer: inside REQ-1; tested implicitly by the four passing tests (they ensure the error path does NOT fire). |
-| REQ-6 | SHIPPED | impl: multi-input outer-loop at `gradcheck.rs:89-181` with per-input substitution at `:128-145`; non-test consumer: tested by `test_gradcheck_linear_combination` (`gradcheck.rs:213-228`) and `test_gradcheck_add` (`:230-245`), both exercising 2-input cases. |
+| REQ-6 | SHIPPED | impl: multi-input outer-loop at `gradcheck.rs:89-181` with per-input substitution at `:128-145`; non-test consumer: tested by `fn test_gradcheck_linear_combination in ferrotorch-core/src/autograd/gradcheck.rs` and `fn test_gradcheck_add in ferrotorch-core/src/autograd/gradcheck.rs`, both exercising 2-input cases. |

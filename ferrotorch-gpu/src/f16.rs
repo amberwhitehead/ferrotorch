@@ -782,6 +782,133 @@ DONE:
 }
 ";
 
+// GELU tanh approximation:
+// 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+// Arithmetic is f32 opmath and the final store is f16 RNE, matching the
+// crate's half CUDA contract and PyTorch's half CUDA accumulation behavior.
+const GELU_TANH_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry gelu_tanh_f16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_b16, %out_h;
+    .reg .f32 %x, %x3, %inner, %sqrt2pi, %c, %y, %two_y, %e2y;
+    .reg .f32 %e2y_m1, %e2y_p1, %th, %one, %half, %log2e, %result;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_b16, [%in];
+    cvt.f32.f16 %x, %x_b16;
+
+    mul.f32 %x3, %x, %x;
+    mul.f32 %x3, %x3, %x;
+    mov.f32 %c, 0f3D372713;
+    mul.f32 %x3, %c, %x3;
+    add.f32 %inner, %x, %x3;
+    mov.f32 %sqrt2pi, 0f3F4C422A;
+    mul.f32 %y, %sqrt2pi, %inner;
+
+    mov.f32 %log2e, 0f3FB8AA3B;
+    add.f32 %two_y, %y, %y;
+    mul.f32 %two_y, %two_y, %log2e;
+    ex2.approx.f32 %e2y, %two_y;
+    mov.f32 %one, 0f3F800000;
+    sub.f32 %e2y_m1, %e2y, %one;
+    add.f32 %e2y_p1, %e2y, %one;
+    rcp.approx.f32 %e2y_p1, %e2y_p1;
+    mul.f32 %th, %e2y_m1, %e2y_p1;
+
+    add.f32 %th, %one, %th;
+    mov.f32 %half, 0f3F000000;
+    mul.f32 %result, %half, %x;
+    mul.f32 %result, %result, %th;
+
+    cvt.rn.f16.f32 %out_h, %result;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
+// GELU sigmoid approximation: x * sigmoid(1.702 * x).
+const GELU_SIGMOID_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry gelu_sigmoid_f16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_b16, %out_h;
+    .reg .f32 %x, %neg_kx, %exp_neg, %one, %denom, %sig, %result, %k;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_b16, [%in];
+    cvt.f32.f16 %x, %x_b16;
+
+    mov.f32 %k, 0f3FDA2720;
+    mul.f32 %neg_kx, %k, %x;
+    neg.f32 %neg_kx, %neg_kx;
+    mul.f32 %neg_kx, %neg_kx, 0f3FB8AA3B;
+    ex2.approx.f32 %exp_neg, %neg_kx;
+    mov.f32 %one, 0f3F800000;
+    add.f32 %denom, %one, %exp_neg;
+    rcp.approx.f32 %sig, %denom;
+    mul.f32 %result, %x, %sig;
+
+    cvt.rn.f16.f32 %out_h, %result;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
 fn launch_1d(n: usize) -> LaunchConfig {
     let grid = ((n as u32).saturating_add(BLOCK_SIZE - 1)) / BLOCK_SIZE;
     LaunchConfig {
@@ -1239,6 +1366,22 @@ pub fn gpu_gelu_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_unary(a, device, GELU_F16_PTX, "gelu_f16_kernel")
+}
+
+/// Apply PyTorch's tanh-approximate GELU to an f16 GPU buffer.
+pub fn gpu_gelu_tanh_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, GELU_TANH_F16_PTX, "gelu_tanh_f16_kernel")
+}
+
+/// Apply ferrotorch's retained sigmoid-approximate GELU to an f16 GPU buffer.
+pub fn gpu_gelu_sigmoid_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, GELU_SIGMOID_F16_PTX, "gelu_sigmoid_f16_kernel")
 }
 
 // ===========================================================================

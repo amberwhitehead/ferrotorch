@@ -76,6 +76,50 @@ impl CompareOp {
 }
 
 // ---------------------------------------------------------------------------
+// GpuUnaryOp — CUDA-resident named unary math selector
+// ---------------------------------------------------------------------------
+
+/// Named floating-point unary operations whose CUDA implementation lives below
+/// `ferrotorch-core`.
+///
+/// This is deliberately an enum, not a stringly typed escape hatch: core keeps
+/// PyTorch/autograd semantics attached to named ops, while the GPU backend owns
+/// the PTX implementation and module cache details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuUnaryOp {
+    /// `atan(x)`.
+    Atan,
+    /// `ceil(x)`.
+    Ceil,
+    /// `floor(x)`.
+    Floor,
+    /// `round(x)` using round-to-nearest-even.
+    Round,
+    /// `trunc(x)`.
+    Trunc,
+    /// `x - trunc(x)`.
+    Frac,
+    /// PyTorch `sign(x)` (`NaN -> 0`, `±0 -> 0`).
+    Sign,
+}
+
+impl GpuUnaryOp {
+    /// Stable kernel-name suffix.
+    #[must_use]
+    pub fn suffix(self) -> &'static str {
+        match self {
+            GpuUnaryOp::Atan => "atan",
+            GpuUnaryOp::Ceil => "ceil",
+            GpuUnaryOp::Floor => "floor",
+            GpuUnaryOp::Round => "round",
+            GpuUnaryOp::Trunc => "trunc",
+            GpuUnaryOp::Frac => "frac",
+            GpuUnaryOp::Sign => "sign",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GpuRngState — serializable GPU RNG state for checkpoint save/restore
 // ---------------------------------------------------------------------------
 
@@ -4597,6 +4641,34 @@ pub trait GpuBackend: Send + Sync {
     fn cos_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "cos_f64" })
     }
+    fn unary_special_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: op.suffix() })
+    }
+    fn unary_special_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: op.suffix() })
+    }
+    fn unary_special_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: op.suffix() })
+    }
+    fn unary_special_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        op: GpuUnaryOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: op.suffix() })
+    }
     fn sqrt_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "sqrt_f32 GPU op not yet implemented".into(),
@@ -6618,6 +6690,22 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 GELU tanh approximation, matching PyTorch
+    /// `gelu(approximate="tanh")`; f32 internal, bf16 RNE store back.
+    fn gelu_tanh_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "gelu_tanh_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
+    /// bf16 GELU sigmoid approximation retained by ferrotorch's public
+    /// `GeluApproximate::Sigmoid`; f32 internal, bf16 RNE store back.
+    fn gelu_sigmoid_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "gelu_sigmoid_bf16_bf16 GPU op not implemented for this backend".into(),
+        })
+    }
+
     /// bf16 SiLU activation `out = x * sigmoid(x)`, f32 internal, bf16 RNE
     /// store back.
     fn silu_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -7323,6 +7411,22 @@ pub trait GpuBackend: Send + Sync {
     /// f16 elementwise GELU `0.5 * x * (1 + erf(x / sqrt(2)))`. f32 internal.
     fn gelu_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "gelu_f16" })
+    }
+
+    /// f16 GELU tanh approximation, matching PyTorch
+    /// `gelu(approximate="tanh")`. f32 internal, f16 RNE store.
+    fn gelu_tanh_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gelu_tanh_f16",
+        })
+    }
+
+    /// f16 GELU sigmoid approximation retained by ferrotorch's public
+    /// `GeluApproximate::Sigmoid`. f32 internal, f16 RNE store.
+    fn gelu_sigmoid_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gelu_sigmoid_f16",
+        })
     }
 
     /// f16 row-wise softmax over `[rows, cols]`. f32 accumulator, f16 store.

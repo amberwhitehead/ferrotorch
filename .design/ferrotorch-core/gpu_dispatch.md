@@ -144,7 +144,7 @@ The file is ~4.3k LOC and exposes:
   `register_gpu_backend(b2)` returns `Err(b2)`
   (`gpu_dispatch.rs` (GpuBackend trait methods)).
 - [x] AC-5: `has_gpu_backend()` toggles with registration
-  (`gpu_dispatch.rs:8521`).
+  (`pub fn has_gpu_backend in ferrotorch-core/src/gpu_dispatch.rs`).
 - [x] AC-6: A concrete backend implementing the trait (i.e.
   `ferrotorch-gpu::CudaBackendImpl`) registers successfully and
   serves dispatch calls.
@@ -164,17 +164,18 @@ The file is organised as:
   methods (`cpu_to_gpu`, `gpu_to_cpu`, `clone_buffer`, `alloc_zeros`,
   `add_f32`, `sub_f32`, `mul_f32`, `neg_f32`, `relu_f32`,
   `matmul_f32`) are unimplemented-by-default and MUST be provided.
-- **Lines 8511-8521**: `register_gpu_backend`, `gpu_backend`,
-  `has_gpu_backend` — the registration plumbing built on a single
-  `OnceLock<Box<dyn GpuBackend>>`.
+- **Backend registry**: `pub fn register_gpu_backend in ferrotorch-core/src/gpu_dispatch.rs`,
+  `pub fn gpu_backend in ferrotorch-core/src/gpu_dispatch.rs`, and
+  `pub fn has_gpu_backend in ferrotorch-core/src/gpu_dispatch.rs` are the
+  registration plumbing built on a single `OnceLock<Box<dyn GpuBackend>>`.
 - **Lines 4286-4300**: in-file test mod (handle construction +
   debug formatting).
 
 Non-test production consumers:
 
-- `ferrotorch-gpu/src/backend_impl.rs:970` (`impl GpuBackend for
-  CudaBackendImpl` + the `register_gpu_backend(...)` call at
-  `:14001`) is the canonical concrete implementation.
+- `impl GpuBackend for CudaBackendImpl in ferrotorch-gpu/src/backend_impl.rs`
+  plus `pub fn init_cuda_backend in ferrotorch-gpu/src/backend_impl.rs`
+  is the canonical concrete implementation and registration path.
 - Inside `ferrotorch-core`, every CUDA-dispatched op routes through
   `gpu_backend()` — see e.g. `gpu_backend in tensor.rs`, `gpu_backend in tensor.rs`,
   `tensor.rs`, `tensor.rs`, `tensor in stride_tricks.rs`,
@@ -217,7 +218,7 @@ indirectly exercises every backend method through the per-op sweeps.
 | REQ-1 | SHIPPED | impl: `enum CompareOp` at `ferrotorch-core/src/gpu_dispatch.rs:22-35` with `suffix()` at `:41-50`; non-test consumer: `GpuBackend::compare(_, _, CompareOp)` method slot dispatches to the suffix-named PTX kernel; the concrete impl in `ferrotorch-gpu/src/backend_impl.rs` reads `op.suffix()` to pick the kernel. |
 | REQ-2 | SHIPPED | impl: `GpuRngState` at `ferrotorch-core/src/gpu_dispatch.rs:94-145` with accessors at `:105-145`; non-test consumer: `GpuBackend::save_rng_state` / `restore_rng_state` produce / consume this struct; `ferrotorch-core::checkpoint` (downstream) serialises it. |
 | REQ-3 | SHIPPED | impl: `GpuBufferHandle` at `ferrotorch-core/src/gpu_dispatch.rs:162-235` with `new` at `:185-197`, accessors at `:199-233`; non-test consumer: `TensorStorage::Gpu(GpuBufferHandle)` variant plus every CUDA op that reads / writes the handle. |
-| REQ-4 | SHIPPED | impl: `trait GpuBackend` at `ferrotorch-core/src/gpu_dispatch.rs:310`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:970`'s `impl GpuBackend for CudaBackendImpl` registers via `register_gpu_backend(...)`. |
+| REQ-4 | SHIPPED | impl: `trait GpuBackend` at `ferrotorch-core/src/gpu_dispatch.rs:310`; non-test consumer: `impl GpuBackend for CudaBackendImpl in ferrotorch-gpu/src/backend_impl.rs` registers via `register_gpu_backend(...)`. |
 | REQ-5 | SHIPPED | impl: elementwise method slots `add_f32` at `gpu_dispatch.rs:401`, `sub_f32` at `:406`, `mul_f32` at `:411`, `neg_f32` at `:444`, `relu_f32` at `:445` (plus the rest of the elementwise zoo throughout the file); non-test consumer: `Tensor::accumulate_grad` GPU path at `tensor.rs:1049-1077` calls `backend.add_f32` / `add_f64`; `grad_fns/arithmetic.rs::add_inner` dispatches the CUDA branches. |
 | REQ-6 | SHIPPED | impl: broadcast variants are sibling slots on the trait alongside the non-broadcast methods (e.g. `broadcast_add_f32`); non-test consumer: `grad_fns/arithmetic.rs::add_inner` picks the broadcast variant via the dispatch macro when input shapes differ. |
 | REQ-7 | SHIPPED | impl: `scale_*` trait slots in the same elementwise section; non-test consumer: `grad_fns/arithmetic.rs::scale_tensor` (`:547-578`) dispatches `backend.scale_f32` / `scale_f64` for the `alpha`-kwarg path in `add_scaled` / `sub_scaled`. |

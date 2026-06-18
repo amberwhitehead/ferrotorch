@@ -26,7 +26,7 @@ API in `torch/cuda/graphs.py`.
 
 ## Requirements
 
-- REQ-1: `CaptureMode` enum (`Global` / `ThreadLocal` (default) /
+- REQ-1: `CaptureMode` enum (`Global` (default) / `ThreadLocal` /
   `Relaxed`) with `pub fn to_cuda` converting to cudarc's
   `CUstreamCaptureMode`. Mirrors `cudaStreamCaptureMode`.
 - REQ-2: `CaptureStatus` enum (`None` / `Active` / `Invalidated`)
@@ -66,7 +66,8 @@ API in `torch/cuda/graphs.py`.
 ## Acceptance Criteria
 
 - [x] AC-1: `pub enum CaptureMode` at line 59 with `Default =
-  ThreadLocal`; `to_cuda()` method at line 75.
+  Global`; `to_cuda()` method at line 75. Matches PyTorch's
+  `torch.cuda.graph(..., capture_error_mode="global")` default.
 - [x] AC-2: `pub enum CaptureStatus` at line 91 with
   `is_capturing()` accessor and `from_cuda()` constructor.
 - [x] AC-3: `pub fn begin_capture` (line 290),
@@ -103,7 +104,7 @@ The module's structure mirrors PyTorch's CUDA-graph plumbing:
 
 1. **Mode / status enums**: `CaptureMode` and `CaptureStatus` are
    thin typed wrappers over the raw cudarc enums, with default
-   `ThreadLocal` matching PyTorch's `torch.cuda.graph` default.
+   `Global` matching PyTorch's `torch.cuda.graph` default.
 
 2. **Capture lifecycle**: the bottom-half capture API
    (`begin_capture` / `end_capture` + variants) is the
@@ -198,8 +199,10 @@ eager path), not numerically — there is no PyTorch-equivalent
 
 Edge cases preserved:
 
-- **CaptureMode default `ThreadLocal`**: matches PyTorch's
-  `torch.cuda.graph(stream)` default.
+- **CaptureMode default `Global`**: matches PyTorch's
+  `torch.cuda.graph(stream, capture_error_mode="global")` default.
+  Tests and single-owner production code may request `ThreadLocal` or
+  `Relaxed` explicitly, mirroring PyTorch's `capture_error_mode`.
 - **Invalidated capture**: callers must call `end_capture` to
   discard a broken graph before doing anything else on the stream.
   This matches upstream's contract documented in

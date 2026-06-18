@@ -29,13 +29,14 @@
 //!
 //! # GPU note
 //!
-//! cuFFT fast paths exist for f32/f64 on the last-axis complex and
-//! real/Hermitian 1-D transforms (#579 / #605 / #634 / #636). They honor
-//! PyTorch's `norm` modes with on-device post-scaling and perform last-axis
-//! resize staging on device. Non-last-axis `dim` and multi-axis `s` still use
-//! the ferray_fft CPU path. bf16/f16 GPU lowering is tracked under #1545. GPU
-//! tensors never silently bounce through host memory on the cuFFT-capable
-//! paths.
+//! cuFFT fast paths exist for f32/f64 complex and real/Hermitian transforms
+//! (#579 / #605 / #634 / #636 / #2003). They honor PyTorch's `norm` modes
+//! with on-device post-scaling and perform resize staging on device. Non-last
+//! real/Hermitian axes and N-D real/Hermitian transforms are handled by
+//! CUDA-resident permutation/packing plus cuFFT composition, matching
+//! PyTorch's SpectralOps CUDA strategy. bf16/f16 GPU lowering is tracked under
+//! #1545. GPU tensors never silently bounce through host memory on the
+//! cuFFT-capable paths.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/fft.md`)
 //!
@@ -286,6 +287,15 @@ fn cuda_inverse_norm_scale(norm: FftNorm, n: usize) -> f64 {
     }
 }
 
+#[inline]
+fn cuda_inverse_raw_norm_scale(norm: FftNorm, n: usize) -> f64 {
+    match norm {
+        FftNorm::Backward => 1.0 / n as f64,
+        FftNorm::Forward => 1.0,
+        FftNorm::Ortho => 1.0 / (n as f64).sqrt(),
+    }
+}
+
 fn scale_cuda_fft_output<T: Float>(
     backend: &dyn crate::gpu_dispatch::GpuBackend,
     handle: crate::gpu_dispatch::GpuBufferHandle,
@@ -303,6 +313,29 @@ fn scale_cuda_fft_output<T: Float>(
             message: "CUDA FFT scaling requires f32 or f64".into(),
         })
     }
+}
+
+fn scale_cuda_tensor<T: Float>(
+    tensor: &Tensor<T>,
+    scale: f64,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if scale.to_bits() == 1.0f64.to_bits() {
+        return Ok(tensor.clone());
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let contiguous = crate::autograd::no_grad::no_grad(|| tensor.contiguous())?;
+    let handle = contiguous.gpu_handle()?;
+    let out = if is_f32::<T>() {
+        backend.scale_f32(handle, scale as f32)?
+    } else if is_f64::<T>() {
+        backend.scale_f64(handle, scale)?
+    } else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: CUDA FFT scaling requires f32 or f64"),
+        });
+    };
+    Tensor::from_storage(TensorStorage::gpu(out), contiguous.shape().to_vec(), false)
 }
 
 fn resize_last_axis_real_cuda<T: Float>(
@@ -438,6 +471,472 @@ fn fft_dim_out_of_range(op: &'static str, dim: isize, signal_ndim: usize) -> Fer
             signal_ndim as isize - 1
         ),
     }
+}
+
+fn resolve_fft_axis(
+    dim: Option<isize>,
+    signal_ndim: usize,
+    op: &'static str,
+) -> FerrotorchResult<usize> {
+    let raw = dim.unwrap_or(-1);
+    wrap_fft_axis(raw, signal_ndim).ok_or_else(|| fft_dim_out_of_range(op, raw, signal_ndim))
+}
+
+#[derive(Debug, Clone)]
+struct NdR2cSpec {
+    axes: Vec<usize>,
+    shape: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct NdC2rSpec {
+    axes: Vec<usize>,
+    input_shape: Vec<usize>,
+    output_shape: Vec<usize>,
+    last_dim_size: usize,
+}
+
+fn canonicalize_nd_r2c_args(
+    input_shape: &[usize],
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    op: &'static str,
+    default_axes: NdC2rDefaultAxes,
+) -> FerrotorchResult<NdR2cSpec> {
+    let signal_ndim = input_shape.len();
+    let resolved_axes = if let Some(raw_axes) = axes {
+        if let Some(sizes) = s
+            && sizes.len() != raw_axes.len()
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: When given, dim and shape arguments must have the same length"
+                ),
+            });
+        }
+        let mut resolved = Vec::with_capacity(raw_axes.len());
+        for &axis in raw_axes {
+            let Some(axis) = wrap_fft_axis(axis, signal_ndim) else {
+                return Err(fft_dim_out_of_range(op, axis, signal_ndim));
+            };
+            resolved.push(axis);
+        }
+        resolved
+    } else {
+        match default_axes {
+            NdC2rDefaultAxes::AllOrShapeLen => {
+                let transform_ndim = s.map_or(signal_ndim, |sizes| sizes.len());
+                if transform_ndim > signal_ndim {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: Got shape with {transform_ndim} values but input tensor only has {signal_ndim} dimensions."
+                        ),
+                    });
+                }
+                ((signal_ndim - transform_ndim)..signal_ndim).collect()
+            }
+            NdC2rDefaultAxes::LastTwo => {
+                if let Some(sizes) = s
+                    && sizes.len() != 2
+                {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: When given, dim and shape arguments must have the same length"
+                        ),
+                    });
+                }
+                if signal_ndim < 2 {
+                    return Err(fft_dim_out_of_range(op, -2, signal_ndim));
+                }
+                vec![signal_ndim - 2, signal_ndim - 1]
+            }
+        }
+    };
+
+    if resolved_axes.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op} must transform at least one axis"),
+        });
+    }
+
+    let mut sorted_axes = resolved_axes.clone();
+    sorted_axes.sort_unstable();
+    if sorted_axes.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: FFT dims must be unique"),
+        });
+    }
+
+    let transform_shape = match s {
+        Some(sizes) => sizes.to_vec(),
+        None => resolved_axes
+            .iter()
+            .map(|&axis| input_shape[axis])
+            .collect(),
+    };
+
+    for &n in &transform_shape {
+        if n == 0 {
+            return Err(invalid_data_points(op, 0));
+        }
+    }
+
+    Ok(NdR2cSpec {
+        axes: resolved_axes,
+        shape: transform_shape,
+    })
+}
+
+fn canonicalize_nd_c2r_args(
+    input_shape: &[usize],
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    op: &'static str,
+    default_axes: NdC2rDefaultAxes,
+) -> FerrotorchResult<NdC2rSpec> {
+    let base = canonicalize_nd_r2c_args(input_shape, s, axes, op, default_axes)?;
+    let last_axis = *base
+        .axes
+        .last()
+        .expect("canonicalize_nd_r2c_args rejects empty axes");
+    let n_eff: i128 = match s {
+        Some(sizes) => *sizes
+            .last()
+            .expect("canonicalize_nd_r2c_args rejects empty shape") as i128,
+        None => 2 * (input_shape[last_axis] as i128 - 1),
+    };
+    if n_eff < 1 {
+        return Err(invalid_data_points(op, n_eff));
+    }
+
+    let last_dim_size = n_eff as usize;
+    let mut input_resize_shape = base.shape.clone();
+    let mut output_shape = base.shape.clone();
+    let last_idx = input_resize_shape.len() - 1;
+    input_resize_shape[last_idx] = last_dim_size / 2 + 1;
+    output_shape[last_idx] = last_dim_size;
+
+    Ok(NdC2rSpec {
+        axes: base.axes,
+        input_shape: input_resize_shape,
+        output_shape,
+        last_dim_size,
+    })
+}
+
+fn checked_shape_product(shape: &[usize], op: &'static str) -> FerrotorchResult<usize> {
+    crate::shape::checked_numel(shape, op)
+}
+
+fn resize_fft_input_cuda<T: Float>(
+    input: &Tensor<T>,
+    axes: &[usize],
+    target_sizes: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    debug_assert_eq!(axes.len(), target_sizes.len());
+    let mut out = input.clone();
+    for (&axis, &target) in axes.iter().zip(target_sizes.iter()) {
+        if target == 0 {
+            return Err(invalid_data_points(op, 0));
+        }
+        let current = out.shape()[axis];
+        if current > target {
+            out = out.narrow(axis, 0, target)?;
+        } else if current < target {
+            let mut pad_shape = out.shape().to_vec();
+            pad_shape[axis] = target - current;
+            let zeros = crate::creation::full_on_device(
+                &pad_shape,
+                <T as num_traits::Zero>::zero(),
+                input.device(),
+                op,
+            )?;
+            out = crate::grad_fns::shape::cat(&[out, zeros], axis as isize)?;
+        }
+    }
+    out.contiguous()
+}
+
+fn axis_pack_perm(signal_ndim: usize, axes: &[usize]) -> Vec<usize> {
+    let mut perm = Vec::with_capacity(signal_ndim);
+    for axis in 0..signal_ndim {
+        if !axes.contains(&axis) {
+            perm.push(axis);
+        }
+    }
+    perm.extend_from_slice(axes);
+    perm
+}
+
+fn inverse_signal_perm(perm: &[usize]) -> Vec<usize> {
+    let mut inverse = vec![0; perm.len()];
+    for (new_pos, &old_axis) in perm.iter().enumerate() {
+        inverse[old_axis] = new_pos;
+    }
+    inverse
+}
+
+fn pack_real_axes_cuda<T: Float>(
+    input: &Tensor<T>,
+    axes: &[usize],
+) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
+    let perm = axis_pack_perm(input.ndim(), axes);
+    let identity = perm.iter().copied().eq(0..perm.len());
+    let packed = if identity {
+        input.contiguous()?
+    } else {
+        input.permute(&perm)?.contiguous()?
+    };
+    Ok((packed, perm))
+}
+
+fn pack_complex_axes_cuda<T: Float>(
+    input: &Tensor<T>,
+    axes: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
+    let shape = input.shape();
+    if shape.len() < 2 || shape.last() != Some(&2) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+    let signal_ndim = shape.len() - 1;
+    let signal_perm = axis_pack_perm(signal_ndim, axes);
+    let mut full_perm = signal_perm.clone();
+    full_perm.push(signal_ndim);
+    let identity = full_perm.iter().copied().eq(0..full_perm.len());
+    let packed = if identity {
+        input.contiguous()?
+    } else {
+        input.permute(&full_perm)?.contiguous()?
+    };
+    Ok((packed, signal_perm))
+}
+
+fn restore_real_axes_cuda<T: Float>(
+    input: &Tensor<T>,
+    pack_perm: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let inverse = inverse_signal_perm(pack_perm);
+    let identity = inverse.iter().copied().eq(0..inverse.len());
+    if identity {
+        return input.contiguous();
+    }
+    input.permute(&inverse)?.contiguous()
+}
+
+fn restore_complex_axes_cuda<T: Float>(
+    input: &Tensor<T>,
+    pack_perm: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let shape = input.shape();
+    if shape.len() < 2 || shape.last() != Some(&2) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+    let signal_ndim = pack_perm.len();
+    let mut inverse = inverse_signal_perm(pack_perm);
+    inverse.push(signal_ndim);
+    let identity = inverse.iter().copied().eq(0..inverse.len());
+    if identity {
+        return input.contiguous();
+    }
+    input.permute(&inverse)?.contiguous()
+}
+
+fn cuda_c2c_axes_raw<T: Float>(
+    input: &Tensor<T>,
+    axes: &[usize],
+    inverse: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if axes.is_empty() {
+        return input.contiguous();
+    }
+    let signal_ndim =
+        input
+            .ndim()
+            .checked_sub(1)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: complex input must have at least one signal dimension"),
+            })?;
+    let axis_sizes: Vec<usize> = axes.iter().map(|&axis| input.shape()[axis]).collect();
+    let axis_product = checked_shape_product(&axis_sizes, op)?;
+    let (packed, pack_perm) =
+        crate::autograd::no_grad::no_grad(|| pack_complex_axes_cuda(input, axes, op))?;
+    let start = signal_ndim - axes.len();
+    let last_axes: Vec<isize> = (start..signal_ndim).map(|axis| axis as isize).collect();
+    let transformed = if inverse {
+        ifftn_norm(&packed, None, Some(&last_axes), FftNorm::Backward)?
+    } else {
+        fftn_norm(&packed, None, Some(&last_axes), FftNorm::Backward)?
+    };
+    let transformed = if inverse {
+        scale_cuda_tensor(&transformed, axis_product as f64, op)?
+    } else {
+        transformed
+    };
+    crate::autograd::no_grad::no_grad(|| restore_complex_axes_cuda(&transformed, &pack_perm, op))
+}
+
+fn rfftn_cuda_impl<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+    default_axes: NdC2rDefaultAxes,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+    let spec = canonicalize_nd_r2c_args(input.shape(), s, axes, op, default_axes)?;
+    let transform_rank = spec.axes.len();
+    let resized = crate::autograd::no_grad::no_grad(|| {
+        resize_fft_input_cuda(input, &spec.axes, &spec.shape, op)
+    })?;
+    let (packed, pack_perm) =
+        crate::autograd::no_grad::no_grad(|| pack_real_axes_cuda(&resized, &spec.axes))?;
+
+    let mut out = rfft_norm(&packed, None, None, FftNorm::Backward)?;
+    if transform_rank > 1 {
+        let signal_ndim = packed.ndim();
+        let c2c_start = signal_ndim - transform_rank;
+        let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
+        out = cuda_c2c_axes_raw(&out, &c2c_axes, false, op)?;
+    }
+    let signal_numel = checked_shape_product(&spec.shape, op)?;
+    out = scale_cuda_tensor(&out, cuda_forward_norm_scale(norm, signal_numel), op)?;
+    let restored =
+        crate::autograd::no_grad::no_grad(|| restore_complex_axes_cuda(&out, &pack_perm, op))?;
+    Ok(Some(restored))
+}
+
+fn irfftn_cuda_impl<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+    default_axes: NdC2rDefaultAxes,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+    let shape = input.shape();
+    if shape.len() < 2 || shape.last() != Some(&2) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+    let signal_shape = &shape[..shape.len() - 1];
+    let spec = canonicalize_nd_c2r_args(signal_shape, s, axes, op, default_axes)?;
+    let transform_rank = spec.axes.len();
+    let resized = crate::autograd::no_grad::no_grad(|| {
+        resize_fft_input_cuda(input, &spec.axes, &spec.input_shape, op)
+    })?;
+    let (packed, pack_perm) =
+        crate::autograd::no_grad::no_grad(|| pack_complex_axes_cuda(&resized, &spec.axes, op))?;
+
+    let mut current = packed;
+    if transform_rank > 1 {
+        let signal_ndim = current.ndim() - 1;
+        let c2c_start = signal_ndim - transform_rank;
+        let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
+        current = cuda_c2c_axes_raw(&current, &c2c_axes, true, op)?;
+    }
+
+    let mut out = irfft_norm(&current, Some(spec.last_dim_size), None, FftNorm::Forward)?;
+    let signal_numel = checked_shape_product(&spec.output_shape, op)?;
+    out = scale_cuda_tensor(&out, cuda_inverse_raw_norm_scale(norm, signal_numel), op)?;
+    let restored = crate::autograd::no_grad::no_grad(|| restore_real_axes_cuda(&out, &pack_perm))?;
+    Ok(Some(restored))
+}
+
+fn hfftn_cuda_impl<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+    default_axes: NdC2rDefaultAxes,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+    let shape = input.shape();
+    if shape.len() < 2 || shape.last() != Some(&2) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+    let signal_shape = &shape[..shape.len() - 1];
+    let spec = canonicalize_nd_c2r_args(signal_shape, s, axes, op, default_axes)?;
+    let transform_rank = spec.axes.len();
+    let resized = crate::autograd::no_grad::no_grad(|| {
+        resize_fft_input_cuda(input, &spec.axes, &spec.input_shape, op)
+    })?;
+    let (packed, pack_perm) =
+        crate::autograd::no_grad::no_grad(|| pack_complex_axes_cuda(&resized, &spec.axes, op))?;
+
+    let mut current = packed;
+    if transform_rank > 1 {
+        let signal_ndim = current.ndim() - 1;
+        let c2c_start = signal_ndim - transform_rank;
+        let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
+        current = cuda_c2c_axes_raw(&current, &c2c_axes, false, op)?;
+    }
+
+    let mut out = hfft_norm(&current, Some(spec.last_dim_size), None, FftNorm::Backward)?;
+    let signal_numel = checked_shape_product(&spec.output_shape, op)?;
+    out = scale_cuda_tensor(&out, cuda_forward_norm_scale(norm, signal_numel), op)?;
+    let restored = crate::autograd::no_grad::no_grad(|| restore_real_axes_cuda(&out, &pack_perm))?;
+    Ok(Some(restored))
+}
+
+fn ihfftn_cuda_impl<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+    default_axes: NdC2rDefaultAxes,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+    let spec = canonicalize_nd_r2c_args(input.shape(), s, axes, op, default_axes)?;
+    let transform_rank = spec.axes.len();
+    let resized = crate::autograd::no_grad::no_grad(|| {
+        resize_fft_input_cuda(input, &spec.axes, &spec.shape, op)
+    })?;
+    let (packed, pack_perm) =
+        crate::autograd::no_grad::no_grad(|| pack_real_axes_cuda(&resized, &spec.axes))?;
+
+    let mut out = ihfft_norm(&packed, None, None, FftNorm::Forward)?;
+    if transform_rank > 1 {
+        let signal_ndim = packed.ndim();
+        let c2c_start = signal_ndim - transform_rank;
+        let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
+        out = cuda_c2c_axes_raw(&out, &c2c_axes, true, op)?;
+    }
+    let signal_numel = checked_shape_product(&spec.shape, op)?;
+    out = scale_cuda_tensor(&out, cuda_inverse_raw_norm_scale(norm, signal_numel), op)?;
+    let restored =
+        crate::autograd::no_grad::no_grad(|| restore_complex_axes_cuda(&out, &pack_perm, op))?;
+    Ok(Some(restored))
 }
 
 fn validate_c2c_nd_fft_args<T: Float>(
@@ -793,6 +1292,25 @@ pub fn rfft_norm<T: Float>(
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
 
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let axis = resolve_fft_axis(dim, ndim, "rfft")?;
+        if axis != ndim - 1 {
+            let n_eff = n.unwrap_or(shape[axis]);
+            let s_buf = [n_eff];
+            let axes_buf = [axis as isize];
+            if let Some(out) = rfftn_cuda_impl(
+                input,
+                Some(&s_buf),
+                Some(&axes_buf),
+                norm,
+                NdC2rDefaultAxes::AllOrShapeLen,
+                "rfft",
+            )? {
+                return Ok(out);
+            }
+        }
+    }
+
     let arr = tensor_to_real_array(input, "rfft")?;
     let result =
         ferray_fft::rfft(&arr, n, dim, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -897,6 +1415,31 @@ pub fn irfft_norm<T: Float>(
         let mut out_shape = batch_shape.to_vec();
         out_shape.push(output_n);
         return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
+    }
+
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let signal_ndim = ndim - 1;
+        let axis = resolve_fft_axis(dim, signal_ndim, "irfft")?;
+        if axis != signal_ndim - 1 {
+            let s_buf;
+            let s_slice = if let Some(n) = n {
+                s_buf = [n];
+                Some(&s_buf[..])
+            } else {
+                None
+            };
+            let axes_buf = [axis as isize];
+            if let Some(out) = irfftn_cuda_impl(
+                input,
+                s_slice,
+                Some(&axes_buf),
+                norm,
+                NdC2rDefaultAxes::AllOrShapeLen,
+                "irfft",
+            )? {
+                return Ok(out);
+            }
+        }
     }
 
     // CPU path: ferray_fft 0.3.8 performs the Hermitian projection + the
@@ -1184,8 +1727,9 @@ fn real_array_to_tensor<T: Float>(
 ///
 /// # GPU note
 ///
-/// The 3-D case (shape `[d, h, w, 2]`, `axes=None`, `s=None`) dispatches to
-/// `cufftPlan3d` on CUDA f32/f64 tensors (#636). Other ranks remain CPU-only.
+/// The default 2-D/3-D and innermost axes-override CUDA f32/f64 cases dispatch
+/// to cuFFT (#636/#966). Other complex layouts still reject CUDA rather than
+/// silently falling through to host memory.
 pub fn fftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1311,8 +1855,9 @@ pub fn fftn_norm<T: Float>(
 ///
 /// # GPU note
 ///
-/// The 3-D case (shape `[d, h, w, 2]`, `axes=None`, `s=None`) dispatches to
-/// `cufftPlan3d` on CUDA f32/f64 tensors (#636). Other ranks remain CPU-only.
+/// The default 2-D/3-D and innermost axes-override CUDA f32/f64 cases dispatch
+/// to cuFFT (#636/#966). Other complex layouts still reject CUDA rather than
+/// silently falling through to host memory.
 pub fn ifftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1443,6 +1988,16 @@ pub fn rfftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("rfftn")?;
+    if let Some(out) = rfftn_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2rDefaultAxes::AllOrShapeLen,
+        "rfftn",
+    )? {
+        return Ok(out);
+    }
     let arr = tensor_to_real_array(input, "rfftn")?;
     let result =
         ferray_fft::rfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1478,6 +2033,16 @@ pub fn irfftn_norm<T: Float>(
         c2r_guard_empty_axis_nd(input, s, axes, "irfftn", NdC2rDefaultAxes::AllOrShapeLen)?
     {
         return Ok(short_circuit);
+    }
+    if let Some(out) = irfftn_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2rDefaultAxes::AllOrShapeLen,
+        "irfftn",
+    )? {
+        return Ok(out);
     }
     let arr = tensor_to_complex_array(input, "irfftn")?;
     // #808: ferray-fft 0.3.8 now performs the Hermitian projection
@@ -1518,6 +2083,9 @@ pub fn rfft2_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("rfft2")?;
+    if let Some(out) = rfftn_cuda_impl(input, s, axes, norm, NdC2rDefaultAxes::LastTwo, "rfft2")? {
+        return Ok(out);
+    }
     let arr = tensor_to_real_array(input, "rfft2")?;
     let result =
         ferray_fft::rfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1554,6 +2122,10 @@ pub fn irfft2_norm<T: Float>(
         c2r_guard_empty_axis_nd(input, s, axes, "irfft2", NdC2rDefaultAxes::LastTwo)?
     {
         return Ok(short_circuit);
+    }
+    if let Some(out) = irfftn_cuda_impl(input, s, axes, norm, NdC2rDefaultAxes::LastTwo, "irfft2")?
+    {
+        return Ok(out);
     }
     let arr = tensor_to_complex_array(input, "irfft2")?;
     let result =
@@ -1593,46 +2165,90 @@ pub fn hfft_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("hfft")?;
+    let shape = input.shape();
+    if shape.is_empty() || *shape.last().unwrap() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "hfft: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+    if shape.len() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "hfft: input must have at least 2 dimensions ([..., n/2+1, 2])".into(),
+        });
+    }
     // CORE-155 / #1849: validate the output length and short-circuit the
     // empty-frequency-axis case BEFORE the CUDA gate or the ferray bridge
     // can evaluate the underflowing `2 * (half_n - 1)` default.
     if let Some(short_circuit) = c2r_guard_empty_axis(input, n, dim, "hfft")? {
         return Ok(short_circuit);
     }
-    // GPU fast path (#636): hfft = conj + irfft, fully on-device. Restricted
-    // to default last-axis / backward-norm (cuFFT can't honour dim/norm here).
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, input.ndim().saturating_sub(1))
-    {
-        let shape = input.shape();
-        // Input must be [..., half_n, 2].
-        if shape.len() >= 2 && *shape.last().unwrap() == 2 {
-            let ndim = shape.len();
-            let half_in = shape[ndim - 2];
-            // Past `c2r_guard_empty_axis`: `half_in >= 1`, so the lazy
-            // default cannot underflow (CORE-155 / #1849).
-            let n_out = match n {
-                Some(v) => v,
-                None => 2 * (half_in - 1),
+
+    // GPU fast path (#636/#2003): hfft = C2R(raw, conj(x)), fully on-device.
+    // Explicit `n`, non-default `norm`, and non-last axes are handled in Rust
+    // by CUDA-resident resize/permutation around the existing cuFFT primitive.
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let signal_ndim = input.ndim() - 1;
+        let axis = resolve_fft_axis(dim, signal_ndim, "hfft")?;
+        if axis != signal_ndim - 1 {
+            let s_buf;
+            let s_slice = if let Some(n) = n {
+                s_buf = [n];
+                Some(&s_buf[..])
+            } else {
+                None
             };
-            // GPU path only when half_in == n_out/2+1 (no pad/truncate needed).
-            if half_in == n_out / 2 + 1 {
-                let batch_shape = &shape[..ndim - 2];
-                let batch_size: usize = crate::shape::numel(batch_shape).max(1);
-                let backend =
-                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let h_out = if is_f32::<T>() {
-                    backend.hfft_f32(input.gpu_handle()?, batch_size, half_in, n_out)?
-                } else {
-                    backend.hfft_f64(input.gpu_handle()?, batch_size, half_in, n_out)?
-                };
-                let mut out_shape = batch_shape.to_vec();
-                out_shape.push(n_out);
-                return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
+            let axes_buf = [axis as isize];
+            if let Some(out) = hfftn_cuda_impl(
+                input,
+                s_slice,
+                Some(&axes_buf),
+                norm,
+                NdC2rDefaultAxes::AllOrShapeLen,
+                "hfft",
+            )? {
+                return Ok(out);
             }
         }
+
+        let ndim = shape.len();
+        let half_in = shape[ndim - 2];
+        // Past `c2r_guard_empty_axis`: `half_in >= 1`, so the lazy default
+        // cannot underflow (CORE-155 / #1849).
+        let n_out = match n {
+            Some(v) => v,
+            None => 2 * (half_in - 1),
+        };
+        let target_half = n_out / 2 + 1;
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
+        let buf = input_contiguous.gpu_handle()?;
+        let (transformed_handle, owned);
+        let buf_for_fft: &crate::gpu_dispatch::GpuBufferHandle = if half_in == target_half {
+            buf
+        } else if is_f32::<T>() {
+            owned = backend.pad_truncate_complex_f32(buf, batch_size, half_in, target_half)?;
+            transformed_handle = &owned;
+            transformed_handle
+        } else {
+            owned = backend.pad_truncate_complex_f64(buf, batch_size, half_in, target_half)?;
+            transformed_handle = &owned;
+            transformed_handle
+        };
+        let h_out = if is_f32::<T>() {
+            backend.hfft_f32(buf_for_fft, batch_size, target_half, n_out)?
+        } else {
+            backend.hfft_f64(buf_for_fft, batch_size, target_half, n_out)?
+        };
+        let h_out =
+            scale_cuda_fft_output::<T>(backend, h_out, cuda_forward_norm_scale(norm, n_out))?;
+        let mut out_shape = batch_shape.to_vec();
+        out_shape.push(n_out);
+        return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
     }
     let arr = tensor_to_complex_array(input, "hfft")?;
     // #808: ferray-fft 0.3.8 performs the Hermitian projection internally
@@ -1670,35 +2286,63 @@ pub fn ihfft_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("ihfft")?;
-    // GPU fast path (#636): ihfft = rfft + scale(1/n) + conj, fully on-device.
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, input.ndim())
-    {
-        let shape = input.shape();
-        if !shape.is_empty() {
-            let ndim = shape.len();
-            let input_n = shape[ndim - 1];
-            let fft_n = n.unwrap_or(input_n);
-            // GPU path only when fft_n == input_n (no pad/truncate).
-            if fft_n == input_n {
-                let batch_shape = &shape[..ndim - 1];
-                let batch_size: usize = crate::shape::numel(batch_shape).max(1);
-                let backend =
-                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let h_out = if is_f32::<T>() {
-                    backend.ihfft_f32(input.gpu_handle()?, batch_size, fft_n)?
-                } else {
-                    backend.ihfft_f64(input.gpu_handle()?, batch_size, fft_n)?
-                };
-                let half_n = fft_n / 2 + 1;
-                let mut out_shape = batch_shape.to_vec();
-                out_shape.push(half_n);
-                out_shape.push(2);
-                return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
+    let shape = input.shape();
+    if shape.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "ihfft: input must have at least 1 dimension".into(),
+        });
+    }
+    // GPU fast path (#636/#2003): ihfft = conj(R2C(raw, x)) plus
+    // direction-specific normalization, fully on-device.
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let ndim = shape.len();
+        let axis = resolve_fft_axis(dim, ndim, "ihfft")?;
+        if axis != ndim - 1 {
+            let s_buf;
+            let s_slice = if let Some(n) = n {
+                s_buf = [n];
+                Some(&s_buf[..])
+            } else {
+                None
+            };
+            let axes_buf = [axis as isize];
+            if let Some(out) = ihfftn_cuda_impl(
+                input,
+                s_slice,
+                Some(&axes_buf),
+                norm,
+                NdC2rDefaultAxes::AllOrShapeLen,
+                "ihfft",
+            )? {
+                return Ok(out);
             }
         }
+
+        let input_n = shape[ndim - 1];
+        let fft_n = n.unwrap_or(input_n);
+        if fft_n == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "ihfft: n must be > 0".into(),
+            });
+        }
+        let batch_shape = &shape[..ndim - 1];
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let resized =
+            crate::autograd::no_grad::no_grad(|| resize_last_axis_real_cuda(input, fft_n))?;
+        let h_out = if is_f32::<T>() {
+            backend.ihfft_f32(resized.gpu_handle()?, batch_size, fft_n)?
+        } else {
+            backend.ihfft_f64(resized.gpu_handle()?, batch_size, fft_n)?
+        };
+        let h_out =
+            scale_cuda_fft_output::<T>(backend, h_out, cuda_inverse_norm_scale(norm, fft_n))?;
+        let half_n = fft_n / 2 + 1;
+        let mut out_shape = batch_shape.to_vec();
+        out_shape.push(half_n);
+        out_shape.push(2);
+        return Tensor::from_storage(TensorStorage::gpu(h_out), out_shape, false);
     }
     let arr = tensor_to_real_array(input, "ihfft")?;
     let result =
@@ -1738,6 +2382,9 @@ pub fn hfft2_norm<T: Float>(
     {
         return Ok(short_circuit);
     }
+    if let Some(out) = hfftn_cuda_impl(input, s, axes, norm, NdC2rDefaultAxes::LastTwo, "hfft2")? {
+        return Ok(out);
+    }
     let arr = tensor_to_complex_array(input, "hfft2")?;
     let result =
         ferray_fft::hfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1770,6 +2417,10 @@ pub fn ihfft2_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("ihfft2")?;
+    if let Some(out) = ihfftn_cuda_impl(input, s, axes, norm, NdC2rDefaultAxes::LastTwo, "ihfft2")?
+    {
+        return Ok(out);
+    }
     let arr = tensor_to_real_array(input, "ihfft2")?;
     let result =
         ferray_fft::ihfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1808,6 +2459,16 @@ pub fn hfftn_norm<T: Float>(
     {
         return Ok(short_circuit);
     }
+    if let Some(out) = hfftn_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2rDefaultAxes::AllOrShapeLen,
+        "hfftn",
+    )? {
+        return Ok(out);
+    }
     let arr = tensor_to_complex_array(input, "hfftn")?;
     let result =
         ferray_fft::hfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1840,6 +2501,16 @@ pub fn ihfftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("ihfftn")?;
+    if let Some(out) = ihfftn_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2rDefaultAxes::AllOrShapeLen,
+        "ihfftn",
+    )? {
+        return Ok(out);
+    }
     let arr = tensor_to_real_array(input, "ihfftn")?;
     let result =
         ferray_fft::ihfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {

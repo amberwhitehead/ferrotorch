@@ -48,6 +48,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CUDA graph capture default and tests diverge from PyTorch (#2012)
+- ferrotorch-gpu graph capture conformance invalidates CUDA stream (#2011)
+- backward_parallel worker failure can hang audit_autograd_engine_utilities (#2009)
+- Design doc cite-drift gate has stale ferrotorch-core anchors (#2008)
+- audit_core088 copysign CUDA test expects unsupported negative strides (#2007)
+- CUDA f64 transcendental forwards/backwards are missing (#2006)
+- f16 CUDA activation forwards fall through to CPU unary_map (#2005)
 - CORE-039: Differentiable FFT wrappers panic before fallible input validation (#1733)
 - CORE-033: `gradcheck` can report success for invalid or non-finite comparisons (#1727)
 - CORE-040: Scalar `scatter_reduce` bypasses validation and can panic on empty source (#1734)
@@ -79,6 +86,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Add CUDA real/Hermitian FFT support for non-last and multi-axis transforms (#2003)
 - CORE-029: Inference-mode tensors are not actually inference-only (#1723)
 - lgamma returns large finite garbage at negative-integer poles (rounded-pi reflection); torch returns +inf (#1946)
 - CORE-092: Generic f64 quantization silently narrows all values and qparams to f32 (#1786)

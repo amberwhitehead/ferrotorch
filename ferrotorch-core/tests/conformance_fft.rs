@@ -36,11 +36,11 @@
 //!
 //! ## Device behaviour notes
 //!
-//! * `fft::{fft, ifft, fft2, ifft2, rfft, irfft}` have GPU fast paths
-//!   for f32/f64; bf16 routes through CPU. `fftn`/`ifftn`/`rfftn`/`irfftn`
-//!   currently CPU-only via ferray-fft (rejects CUDA tensors with
-//!   `NotImplementedOnCuda`). `fftshift` / `ifftshift` likewise reject
-//!   CUDA tensors.
+//! * `fft::{fft, ifft, fft2, ifft2, fftn, ifftn, rfft, irfft, rfftn,
+//!   irfftn, hfft, ihfft, hfftn, ihfftn}` have f32/f64 GPU fast paths for
+//!   the covered cuFFT layouts. Unsupported CUDA FFT layouts reject explicitly
+//!   rather than silently transferring through the host. `fftshift` /
+//!   `ifftshift` reject CUDA tensors.
 //! * `signal::*` always returns CPU `Tensor<f64>` — caller moves to
 //!   device explicitly. Matches PyTorch where `torch.signal.windows.*`
 //!   accepts `device=` but the cost-of-CPU-compute is sub-microsecond.
@@ -833,8 +833,8 @@ fn cpu_ifft2() {
 // Cat A — fftn / ifftn / rfftn / irfftn
 // ---------------------------------------------------------------------------
 //
-// fftn / ifftn have a GPU fast path for the 3-D case (shape [d,h,w,2]) via
-// cufftPlan3d (#636). rfftn / irfftn remain CPU-only (ferray-fft path).
+// fftn / ifftn have CUDA fast paths for covered cuFFT layouts; rfftn / irfftn
+// compose CUDA-resident real transforms with C2C transforms for f32/f64.
 
 fn run_fftn_for_device(op_name: &str, device_label: &str, device: Device) {
     let file = load_fixtures();
@@ -2257,11 +2257,9 @@ fn surface_coverage_grad_fn_struct_substring_pins() {
 // `#[cfg(feature = "gpu")]` rather than `#[ignore]` so a non-GPU build
 // has these tests genuinely absent (not silently skipped).
 //
-// The fft module's GPU support is partial: fft / ifft / fft2 / ifft2 / rfft /
-// irfft have cuFFT-backed GPU paths for f32/f64. fftn / ifftn / rfftn / irfftn
-// / hfft / ihfft / fftshift / ifftshift currently CPU-only (they reject CUDA
-// tensors with NotImplementedOnCuda). We only run the GPU-supported ops on
-// CUDA below.
+// The fft module's GPU support is still intentionally bounded to implemented
+// cuFFT layouts and dtypes. Real/Hermitian f32/f64 paths now cover non-last
+// axes and N-D composition; unsupported CUDA FFT layouts reject explicitly.
 
 #[cfg(feature = "gpu")]
 mod gpu {

@@ -9,11 +9,15 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use ferrotorch_gpu::GpuResult;
 use ferrotorch_gpu::buffer::CudaBuffer;
 use ferrotorch_gpu::device::GpuDevice;
-use ferrotorch_gpu::graph::{CapturePool, begin_capture_with_pool, end_capture_with_pool};
-use ferrotorch_gpu::kernels::gpu_add_into;
-use ferrotorch_gpu::transfer::{alloc_zeros_f32, cpu_to_gpu};
+use ferrotorch_gpu::graph::{
+    CaptureMode, CapturePool, begin_capture_with_mode, begin_capture_with_pool,
+    begin_capture_with_pool_mode, capture_into_private_pool, end_capture, end_capture_with_pool,
+};
+use ferrotorch_gpu::kernels::gpu_add_into_on_stream;
+use ferrotorch_gpu::transfer::{alloc_zeros_f32, cpu_to_gpu, gpu_to_cpu};
 
 /// Serialise CUDA stream-capture sections across this test binary's
 /// thread pool. cargo runs tests within one binary in parallel, and
@@ -46,36 +50,63 @@ fn captured_graph_holds_pool_buffers_alive() {
     // Pre-allocate buffers BEFORE capture (CUDA graph requirement).
     let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let b_data: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0];
-    let mut out: CudaBuffer<f32> = alloc_zeros_f32(4, &device).expect("alloc out");
+    let out: CudaBuffer<f32> = alloc_zeros_f32(4, &device).expect("alloc out");
     let a = cpu_to_gpu(&a_data, &device).expect("upload a");
     let b = cpu_to_gpu(&b_data, &device).expect("upload b");
 
-    let pool = Arc::new(CapturePool::new());
-    // We need raw pointers from the buffers during capture, so we
-    // wrap each in an Arc so we can both register it with the pool
-    // (for lifetime extension) and use it for the kernel launch.
-    // Easiest path: keep the originals on the stack until after
-    // capture, then donate them.
+    let pool = Arc::new(CapturePool::with_private_pool(device.ordinal()).expect("private pool"));
     let stream = device.context().new_stream().expect("non-blocking stream");
 
-    begin_capture_with_pool(&pool, &stream).expect("begin capture");
-    gpu_add_into(&a, &b, &mut out, &device).expect("add_into during capture");
-    let graph = end_capture_with_pool(&stream, Arc::clone(&pool)).expect("end_capture_with_pool");
+    // Pre-warm the PTX module before capture. cuModuleLoadData is not
+    // capture-safe and would invalidate an otherwise valid CUDA graph.
+    let mut warmup = alloc_zeros_f32(4, &device).expect("alloc warmup");
+    device.stream().synchronize().expect("sync default stream");
+    gpu_add_into_on_stream(&a, &b, &mut warmup, &device, &stream).expect("warmup add_into");
+    stream.synchronize().expect("warmup sync");
+    device.stream().synchronize().expect("sync before capture");
 
-    // Donate the buffers to the pool now so they outlive the
-    // local variables we're about to drop.
+    let (graph, (a, b, out)) = capture_into_private_pool(
+        device.context(),
+        &stream,
+        &pool,
+        CaptureMode::Relaxed,
+        |e| e,
+        || -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, CudaBuffer<f32>)> { Ok((a, b, out)) },
+        |(a, b, out)| gpu_add_into_on_stream(a, b, out, &device, &stream),
+    )
+    .expect("capture_into_private_pool");
+
+    assert!(graph.has_pool());
+    assert_eq!(graph.pool_buffer_count(), 0);
+
+    // Captured kernels are recorded, not executed, during capture.
+    assert_eq!(
+        gpu_to_cpu(&out, &device).expect("copy out before replay"),
+        vec![0.0f32; 4]
+    );
+
+    graph.launch().expect("replay 1");
+    stream.synchronize().expect("sync replay 1");
+    assert_eq!(
+        gpu_to_cpu(&out, &device).expect("copy out after replay"),
+        vec![11.0f32, 22.0, 33.0, 44.0]
+    );
+
+    // Donate the buffers to the pool now so they outlive the local variables
+    // we're about to move out of scope; the CapturedGraph's Arc<CapturePool>
+    // keeps the recorded pointers valid.
     pool.record_buffer(a);
     pool.record_buffer(b);
     pool.record_buffer(out);
     assert_eq!(pool.buffer_count(), 3);
-    assert!(graph.has_pool());
     assert_eq!(graph.pool_buffer_count(), 3);
 
     // Replay the graph — the recorded pointers must still be valid
     // because the pool kept them alive.
-    graph.launch().expect("replay 1");
     graph.launch().expect("replay 2");
+    stream.synchronize().expect("sync replay 2");
     graph.launch().expect("replay 3");
+    stream.synchronize().expect("sync replay 3");
 }
 
 #[test]
@@ -93,7 +124,7 @@ fn dropping_graph_releases_pool_buffers() {
 
     // Build a no-op graph that holds the pool.
     let stream = device.context().new_stream().expect("non-blocking stream");
-    begin_capture_with_pool(&pool, &stream).expect("begin");
+    begin_capture_with_pool_mode(&pool, &stream, CaptureMode::ThreadLocal).expect("begin");
     let graph = end_capture_with_pool(&stream, Arc::clone(&pool)).expect("end");
     assert!(graph.has_pool());
 
@@ -132,9 +163,7 @@ fn captured_graph_without_pool_has_zero_buffer_count() {
     // The legacy end_capture path produces a graph with no pool.
     let device = dev();
     let stream = device.context().new_stream().expect("non-blocking stream");
-    use ferrotorch_gpu::graph::{begin_capture, end_capture};
-
-    begin_capture(&stream).expect("begin");
+    begin_capture_with_mode(&stream, CaptureMode::ThreadLocal).expect("begin");
     let graph = end_capture(&stream).expect("end");
     assert!(!graph.has_pool());
     assert_eq!(graph.pool_buffer_count(), 0);

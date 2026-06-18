@@ -1,7 +1,8 @@
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use std::{env, process::Command, thread};
+use std::{env, thread};
 
 use ferrotorch_core::autograd::gradcheck::gradcheck;
 use ferrotorch_core::autograd::graph::backward_parallel;
@@ -20,6 +21,8 @@ fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 fn constant(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
 }
+
+static CHILD_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug)]
 struct PassThroughBackward {
@@ -111,28 +114,49 @@ fn parallel_failure_graph() -> Tensor<f32> {
 }
 
 fn run_exact_child_before_timeout(test_name: &str, env_key: &str, failure_message: &str) {
+    let _child_test_guard = CHILD_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let timeout = Duration::from_secs(
+        env::var("FERROTORCH_CHILD_TEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(30),
+    );
     let exe = env::current_exe().expect("current test binary");
     let mut child = Command::new(exe)
         .arg("--exact")
         .arg(test_name)
         .arg("--nocapture")
         .env(env_key, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn child test");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait().expect("poll child") {
+        if child.try_wait().expect("poll child").is_some() {
+            let output = child.wait_with_output().expect("collect child output");
             assert!(
-                status.success(),
-                "child test {test_name} exited with {status}"
+                output.status.success(),
+                "child test {test_name} exited with {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
             );
             return;
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let _ = child.wait();
-            panic!("{failure_message}");
+            let output = child.wait_with_output().expect("collect timed-out child");
+            panic!(
+                "{failure_message} after {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
         thread::sleep(Duration::from_millis(10));
     }

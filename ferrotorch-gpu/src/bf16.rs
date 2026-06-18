@@ -3635,6 +3635,149 @@ DONE:
 }
 ";
 
+// GELU tanh approximation:
+// 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+// bf16 is decoded by placing its payload in the high half of an f32 register;
+// results are stored with round-to-nearest-even bf16 encoding.
+const GELU_TANH_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry gelu_tanh_bf16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_b16, %zero16;
+    .reg .b32 %x_u32, %bits, %round, %lsb;
+    .reg .f32 %x, %x3, %inner, %sqrt2pi, %c, %y, %two_y, %e2y;
+    .reg .f32 %e2y_m1, %e2y_p1, %th, %one, %half, %log2e, %result;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_b16, [%in];
+    mov.b16 %zero16, 0;
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x, %x_u32;
+
+    mul.f32 %x3, %x, %x;
+    mul.f32 %x3, %x3, %x;
+    mov.f32 %c, 0f3D372713;
+    mul.f32 %x3, %c, %x3;
+    add.f32 %inner, %x, %x3;
+    mov.f32 %sqrt2pi, 0f3F4C422A;
+    mul.f32 %y, %sqrt2pi, %inner;
+
+    mov.f32 %log2e, 0f3FB8AA3B;
+    add.f32 %two_y, %y, %y;
+    mul.f32 %two_y, %two_y, %log2e;
+    ex2.approx.f32 %e2y, %two_y;
+    mov.f32 %one, 0f3F800000;
+    sub.f32 %e2y_m1, %e2y, %one;
+    add.f32 %e2y_p1, %e2y, %one;
+    rcp.approx.f32 %e2y_p1, %e2y_p1;
+    mul.f32 %th, %e2y_m1, %e2y_p1;
+
+    add.f32 %th, %one, %th;
+    mov.f32 %half, 0f3F000000;
+    mul.f32 %result, %half, %x;
+    mul.f32 %result, %result, %th;
+
+    mov.b32 %bits, %result;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+// GELU sigmoid approximation: x * sigmoid(1.702 * x).
+const GELU_SIGMOID_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry gelu_sigmoid_bf16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_b16, %zero16;
+    .reg .b32 %x_u32, %bits, %round, %lsb;
+    .reg .f32 %x, %neg_kx, %exp_neg, %one, %denom, %sig, %result, %k;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_b16, [%in];
+    mov.b16 %zero16, 0;
+    mov.b32 %x_u32, {%zero16, %x_b16};
+    mov.b32 %x, %x_u32;
+
+    mov.f32 %k, 0f3FDA2720;
+    mul.f32 %neg_kx, %k, %x;
+    neg.f32 %neg_kx, %neg_kx;
+    mul.f32 %neg_kx, %neg_kx, 0f3FB8AA3B;
+    ex2.approx.f32 %exp_neg, %neg_kx;
+    mov.f32 %one, 0f3F800000;
+    add.f32 %denom, %one, %exp_neg;
+    rcp.approx.f32 %sig, %denom;
+    mul.f32 %result, %x, %sig;
+
+    mov.b32 %bits, %result;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
 /// Apply GELU activation `gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))`
 /// elementwise to a bf16 GPU buffer.
 ///
@@ -3693,6 +3836,27 @@ pub fn gpu_gelu_bf16(
             .launch(cfg)?;
     }
     Ok(out)
+}
+
+/// Apply PyTorch's tanh-approximate GELU to a bf16 GPU buffer.
+pub fn gpu_gelu_tanh_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(input, device, GELU_TANH_BF16_PTX, "gelu_tanh_bf16_kernel")
+}
+
+/// Apply ferrotorch's retained sigmoid-approximate GELU to a bf16 GPU buffer.
+pub fn gpu_gelu_sigmoid_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(
+        input,
+        device,
+        GELU_SIGMOID_BF16_PTX,
+        "gelu_sigmoid_bf16_kernel",
+    )
 }
 
 // ===========================================================================

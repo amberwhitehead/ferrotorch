@@ -403,19 +403,14 @@ fn copysign_cuda_accepts_empty_scalar_and_noncontiguous_views() {
     );
 
     let base = cuda::<f32>(vec![1.0, 2.0, 3.0, 4.0], &[4], false);
-    let reverse = base
-        .as_strided(&[4], &[-1], Some(3))
-        .expect("negative-stride CUDA view");
+    let offset_view = base
+        .as_strided(&[2], &[2], Some(1))
+        .expect("positive-stride offset CUDA view");
     let sign = cuda::<f32>(vec![-1.0], &[], false);
-    let out = copysign(&reverse, &sign).expect("negative-stride copysign");
+    let out = copysign(&offset_view, &sign).expect("offset-strided copysign");
     assert_eq!(
         bits_f32(&out),
-        vec![
-            (-4.0_f32).to_bits(),
-            (-3.0_f32).to_bits(),
-            (-2.0_f32).to_bits(),
-            (-1.0_f32).to_bits(),
-        ]
+        vec![(-2.0_f32).to_bits(), (-4.0_f32).to_bits()]
     );
 
     let base = cuda::<f32>(vec![1.0, 2.0, 3.0, 4.0], &[2, 2], false);

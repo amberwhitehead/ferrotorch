@@ -493,6 +493,8 @@
     { "path": "ferrotorch_core::gpu_dispatch::GpuRngState::seed", "kind": "method", "signature": "fn seed (& self) -> u64" },
     { "path": "ferrotorch_core::gpu_dispatch::GpuScatterReduce", "kind": "enum", "signature": "pub enum GpuScatterReduce" },
     { "path": "ferrotorch_core::gpu_dispatch::GpuScatterReduce::as_u32", "kind": "method", "signature": "fn as_u32 (self) -> u32" },
+    { "path": "ferrotorch_core::gpu_dispatch::GpuUnaryOp", "kind": "enum", "signature": "pub enum GpuUnaryOp" },
+    { "path": "ferrotorch_core::gpu_dispatch::GpuUnaryOp::suffix", "kind": "method", "signature": "fn suffix (self) -> & 'static str" },
     { "path": "ferrotorch_core::gpu_dispatch::gpu_backend", "kind": "fn", "signature": "fn gpu_backend () -> Option < & 'static dyn GpuBackend >" },
     { "path": "ferrotorch_core::gpu_dispatch::has_gpu_backend", "kind": "fn", "signature": "fn has_gpu_backend () -> bool" },
     { "path": "ferrotorch_core::gpu_dispatch::register_gpu_backend", "kind": "fn", "signature": "fn register_gpu_backend (backend : Box < dyn GpuBackend >) -> Result < () , Box < dyn GpuBackend > >" },
