@@ -35,8 +35,10 @@ through the `*_norm` sibling of each public fn (e.g. `fft_norm(input, n, dim,
 norm)`); the historical `fft(input, n)` / `fft2(input)` / `fftn(input, s,
 axes)` signatures remain as default-arg wrappers. Complex values follow
 PyTorch's "trailing dim of size 2" interleaved-real representation. GPU paths
-exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
-(#579 / #605 / #634 / #636).
+exist for f32/f64 via cuFFT and resident resize/axis-pack/restore staging:
+1-D complex and real/Hermitian transforms handle explicit `n`/`dim`/`norm`,
+and N-D complex/real/Hermitian transforms handle arbitrary valid `s`/`dim`/`norm`
+without host round trips (#579 / #605 / #634 / #636 / #2003 / #2004).
 
 ## Requirements
 
@@ -65,10 +67,12 @@ exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
   dims)` cycle each axis by `dim_size/2` (floor) / `(dim_size+1)/2`
   respectively. Delegate to `ferray_fft`. Mirrors `torch.fft.fftshift`
   / `torch.fft.ifftshift`.
-- REQ-9: GPU dispatch — `fft`/`ifft` route to cuFFT for f32/f64 on
-  CUDA (`backend.fft_c2c_*` and `pad_truncate_complex_*` from #579 /
-  #605) on the default last-axis / `norm="backward"` case; explicit
-  `dim`/`norm`/`s` fall through to the ferray_fft CPU path. `f16`/`bf16`
+- REQ-9: GPU dispatch — f32/f64 CUDA transforms route to cuFFT without host
+  round trips. `fft`/`ifft` use `backend.fft_c2c_*` and
+  `pad_truncate_complex_*` for explicit `n`; N-D complex transforms use
+  CUDA-resident resize/axis-pack/restore around `backend.fftn_axes_c2c_*`
+  for arbitrary valid `s`/`dim`/`norm`; real/Hermitian N-D transforms compose
+  the same resident C2C primitive with R2C/C2R cuFFT paths. `f16`/`bf16`
   inputs are **rejected** on the CPU transform path (`reject_half_cpu_fft`),
   mirroring torch's `Unsupported dtype` `TORCH_CHECK`
   (`SpectralOps.cpp:88-90`); native CUDA complex-half lowering
@@ -92,9 +96,9 @@ exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
   random `[..., n, 2]` inputs.
 - [x] AC-3: `rfft` of an even-length real signal produces shape
   `[..., n/2+1, 2]`.
-- [x] AC-4: CUDA f32/f64 `fft` paths route through `backend.fft_c2c_*`
-  on the default last-axis / `norm="backward"` case (the cuFFT branch in
-  `fft_norm` / `ifft_norm`, cuFFT, no host bounce).
+- [x] AC-4: CUDA f32/f64 `fft`/`ifft` paths route through cuFFT with
+  on-device resize and normalization for explicit `n`/`dim`/`norm`, no host
+  bounce.
 - [x] AC-5: `f16`/`bf16` CPU dtype contract — the CPU transforms reject
   half-precision inputs with an `Unsupported dtype` error mirroring
   `SpectralOps.cpp:88-90` (verified live vs torch 2.11, which raises
@@ -112,6 +116,11 @@ exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
   tests (`fft_ortho_norm_scales_dc_by_sqrt_n`, `fft_dim_transforms_named_axis`,
   `rfft_dim_transforms_named_axis`, `fftn_s_resizes_named_axes`) and the
   parity sweep (`grad_fns/fft.md` ACs, all 18 ops `0 skipped, 0 failed`).
+- [x] AC-7: CUDA f32/f64 complex N-D transforms handle non-innermost axes,
+  explicit `s` crop/pad, batched `fft2`, non-default `norm`, and backward
+  without CPU fallback. Pinned by `audit_core2004_fft_cuda_complex_axes` and
+  the live PyTorch-generated `conformance_fft` CUDA fixture rows that used to
+  be skipped for `ndim_3_axes_0` / `ndim_2_with_s`.
 
 ## Architecture
 
@@ -126,19 +135,22 @@ computing the butterfly in f64.
 Each public fn is a thin default-arg wrapper over a `*_norm` sibling threading
 `norm` ([`FftNorm`]) and `dim` / `s`:
 
-- `fft` → `fft_norm(input, n, dim, norm)`; `ifft` → `ifft_norm`. cuFFT
-  (`backend.fft_c2c_{f32,f64}`, with `pad_truncate_complex_*` for `n !=
-  input_n` per #605) handles the default last-axis / `norm="backward"` case;
-  everything else goes through `ferray_fft::fft` / `ifft` (which take
-  `axis: Option<isize>` + `norm: FftNorm`).
+- `fft` → `fft_norm(input, n, dim, norm)`; `ifft` → `ifft_norm`. CUDA f32/f64
+  inputs use cuFFT (`backend.fft_c2c_{f32,f64}`, with
+  `pad_truncate_complex_*` for `n != input_n` per #605) for last-axis cases
+  and dispatch non-last axes through the N-D C2C resident pack/restore path.
 - `rfft` → `rfft_norm` / `irfft` → `irfft_norm` (real-to-complex pair;
   `ferray_fft::rfft` / `irfft` thread `axis` + `norm`). `rfft` output has
   shape `[..., n/2+1, 2]`.
-- `fft2` → `fft2_norm` / `ifft2` → `ifft2_norm` (`ferray_fft::fft2` / `ifft2`
-  with `s` / `axes` / `norm`; arbitrary-length `dim` lists are honoured since
-  ferray's `fft2` accepts any `axes`).
-- `fftn`/`ifftn`/`rfftn`/`irfftn` → their `*_norm` siblings delegating to
-  `ferray_fft::fftn` / `ifftn` / `rfftn` / `irfftn`.
+- `fft2` → `fft2_norm` / `ifft2` → `ifft2_norm`; CUDA f32/f64 inputs use the
+  same resident N-D C2C path, including batched inputs, explicit `s`, arbitrary
+  valid `dim`, and all `norm` modes. CPU inputs use `ferray_fft::fft2` /
+  `ifft2`.
+- `fftn`/`ifftn`/`rfftn`/`irfftn` → their `*_norm` siblings. CUDA f32/f64
+  complex N-D transforms use resident resize/axis-pack/restore plus
+  `backend.fftn_axes_c2c_*`; real/Hermitian N-D transforms compose the resident
+  C2C path with R2C/C2R cuFFT. CPU inputs delegate to `ferray_fft::fftn` /
+  `ifftn` / `rfftn` / `irfftn`.
 - `hfft` → `hfft_norm` / `ihfft` → `ihfft_norm`, and the 2-D / N-D Hermitian
   ops `hfft2`/`ihfft2`/`hfftn`/`ihfftn` → their `*_norm` siblings, all
   delegating to the matching `ferray_fft::h*` / `ih*` entry points.
@@ -191,4 +203,4 @@ correctness.
 | REQ-6 | SHIPPED | impl: `hfft`/`ihfft` at `fft.rs:1000,1048`; non-test consumer: re-exported as `ferrotorch_core::hfft`/`ihfft` at `lib.rs:154` |
 | REQ-7 | SHIPPED | impl: `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; non-test consumer: re-exported as `ferrotorch_core::fftfreq`/`rfftfreq` at `lib.rs:153-155` |
 | REQ-8 | SHIPPED | impl: `fftshift`/`ifftshift` at `fft.rs:1122,1141`; non-test consumer: re-exported as `ferrotorch_core::fftshift`/`ifftshift` at `lib.rs:153-155` |
-| REQ-9 | SHIPPED | impl: cuFFT dispatch in `fft_norm`/`ifft_norm` + the CPU half-rejection guard `reject_half_cpu_fft` in `fft.rs` (mirrors `SpectralOps.cpp:88-90`); non-test consumer: `ComplexTensor::fft` in `complex_tensor.rs` (the f32/f64 cuFFT path) and the 18 `*_norm` transform entry points calling `reject_half_cpu_fft` (the CPU f16/bf16 rejection path). NB: native CUDA complex-half (`chalf`) lowering remains blocked on #1545; the CPU contract is now SHIPPED (rejects half like torch) |
+| REQ-9 | SHIPPED | impl: cuFFT dispatch in `fft_norm`/`ifft_norm`, `c2c_cuda_impl`, `cuda_c2c_axes_raw`, and the real/Hermitian CUDA composition helpers in `fft.rs`; non-test consumer: `ComplexTensor::fft` / `fft2` plus the public `*_norm` FFT entry points. CUDA f32/f64 complex N-D coverage includes non-innermost axes, explicit `s`, non-default `norm`, and CUDA-resident backward, pinned by `audit_core2004_fft_cuda_complex_axes` and the live PyTorch-generated `conformance_fft` CUDA rows. The CPU half-rejection guard `reject_half_cpu_fft` mirrors `SpectralOps.cpp:88-90`; native CUDA complex-half (`chalf`) lowering remains blocked on #1545. |

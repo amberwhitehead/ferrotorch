@@ -229,6 +229,16 @@ fn take_parallel_error(
     }
 }
 
+fn notify_parallel_waiters(ready: &Mutex<VecDeque<TensorId>>, condvar: &Condvar) {
+    // Pair condition changes with the ready-queue mutex used by waiters.
+    // Otherwise a notifier can race between the waiter's final cancelled /
+    // processed check and its `Condvar::wait`, losing the wake-up permanently.
+    let _guard = ready
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    condvar.notify_all();
+}
+
 /// Compute gradients of all leaf tensors that contribute to `root`.
 ///
 /// Implements reverse-mode automatic differentiation:
@@ -617,7 +627,7 @@ pub fn backward_parallel<T: Float>(
 
                             let prev = processed.fetch_add(1, Ordering::AcqRel);
                             if prev + 1 >= total_nodes {
-                                condvar.notify_all();
+                                notify_parallel_waiters(&ready, &condvar);
                             }
                             Ok(true)
                         },
@@ -630,7 +640,7 @@ pub fn backward_parallel<T: Float>(
                         Err(e) => {
                             record_parallel_error(&first_error, e);
                             cancelled.store(true, Ordering::Release);
-                            condvar.notify_all();
+                            notify_parallel_waiters(&ready, &condvar);
                             return;
                         }
                     }

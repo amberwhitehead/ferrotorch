@@ -442,6 +442,12 @@ enum NdC2rDefaultAxes {
     LastTwo,
 }
 
+#[derive(Clone, Copy)]
+enum NdC2cDefaultAxes {
+    AllOrShapeLen,
+    LastTwo,
+}
+
 fn wrap_fft_axis(axis: isize, signal_ndim: usize) -> Option<usize> {
     if axis >= 0 && (axis as usize) < signal_ndim {
         Some(axis as usize)
@@ -494,6 +500,106 @@ struct NdC2rSpec {
     input_shape: Vec<usize>,
     output_shape: Vec<usize>,
     last_dim_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NdC2cSpec {
+    axes: Vec<usize>,
+    shape: Vec<usize>,
+}
+
+fn canonicalize_nd_c2c_args(
+    input_shape: &[usize],
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    op: &'static str,
+    default_axes: NdC2cDefaultAxes,
+) -> FerrotorchResult<NdC2cSpec> {
+    if input_shape.is_empty() || input_shape.last() != Some(&2) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {input_shape:?}"
+            ),
+        });
+    }
+
+    let signal_shape = &input_shape[..input_shape.len() - 1];
+    let signal_ndim = signal_shape.len();
+    let resolved_axes = if let Some(raw_axes) = axes {
+        if let Some(sizes) = s
+            && sizes.len() != raw_axes.len()
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: When given, dim and shape arguments must have the same length"
+                ),
+            });
+        }
+        let mut resolved = Vec::with_capacity(raw_axes.len());
+        for &axis in raw_axes {
+            let Some(axis) = wrap_fft_axis(axis, signal_ndim) else {
+                return Err(fft_dim_out_of_range(op, axis, signal_ndim));
+            };
+            resolved.push(axis);
+        }
+        resolved
+    } else {
+        match default_axes {
+            NdC2cDefaultAxes::AllOrShapeLen => {
+                let transform_ndim = s.map_or(signal_ndim, |sizes| sizes.len());
+                if transform_ndim > signal_ndim {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: Got shape with {transform_ndim} values but input tensor only has {signal_ndim} dimensions."
+                        ),
+                    });
+                }
+                ((signal_ndim - transform_ndim)..signal_ndim).collect()
+            }
+            NdC2cDefaultAxes::LastTwo => {
+                if let Some(sizes) = s
+                    && sizes.len() != 2
+                {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: When given, dim and shape arguments must have the same length"
+                        ),
+                    });
+                }
+                if signal_ndim < 2 {
+                    return Err(fft_dim_out_of_range(op, -2, signal_ndim));
+                }
+                vec![signal_ndim - 2, signal_ndim - 1]
+            }
+        }
+    };
+
+    let mut sorted_axes = resolved_axes.clone();
+    sorted_axes.sort_unstable();
+    if sorted_axes.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: FFT dims must be unique"),
+        });
+    }
+
+    let transform_shape = match s {
+        Some(sizes) => sizes.to_vec(),
+        None => resolved_axes
+            .iter()
+            .map(|&axis| signal_shape[axis])
+            .collect(),
+    };
+
+    for &n in &transform_shape {
+        if n == 0 {
+            return Err(invalid_data_points(op, 0));
+        }
+    }
+
+    Ok(NdC2cSpec {
+        axes: resolved_axes,
+        shape: transform_shape,
+    })
 }
 
 fn canonicalize_nd_r2c_args(
@@ -761,30 +867,77 @@ fn cuda_c2c_axes_raw<T: Float>(
     if axes.is_empty() {
         return input.contiguous();
     }
-    let signal_ndim =
-        input
-            .ndim()
-            .checked_sub(1)
-            .ok_or_else(|| FerrotorchError::InvalidArgument {
-                message: format!("{op}: complex input must have at least one signal dimension"),
-            })?;
-    let axis_sizes: Vec<usize> = axes.iter().map(|&axis| input.shape()[axis]).collect();
-    let axis_product = checked_shape_product(&axis_sizes, op)?;
-    let (packed, pack_perm) =
-        crate::autograd::no_grad::no_grad(|| pack_complex_axes_cuda(input, axes, op))?;
-    let start = signal_ndim - axes.len();
-    let last_axes: Vec<isize> = (start..signal_ndim).map(|axis| axis as isize).collect();
-    let transformed = if inverse {
-        ifftn_norm(&packed, None, Some(&last_axes), FftNorm::Backward)?
+    const CUFFT_MAX_NDIM: usize = 3;
+
+    let mut current = input.contiguous()?;
+    for chunk in axes.chunks(CUFFT_MAX_NDIM) {
+        let axis_sizes: Vec<usize> = chunk.iter().map(|&axis| current.shape()[axis]).collect();
+        let axis_product = checked_shape_product(&axis_sizes, op)?;
+        let (packed, pack_perm) =
+            crate::autograd::no_grad::no_grad(|| pack_complex_axes_cuda(&current, chunk, op))?;
+        let signal_ndim =
+            packed
+                .ndim()
+                .checked_sub(1)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: complex input must have at least one signal dimension"),
+                })?;
+        let transform_rank = chunk.len();
+        let suffix_axes: Vec<usize> = (signal_ndim - transform_rank..signal_ndim).collect();
+        let spatial_shape = &packed.shape()[..signal_ndim];
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let h = if is_f32::<T>() {
+            backend.fftn_axes_c2c_f32(packed.gpu_handle()?, spatial_shape, &suffix_axes, inverse)?
+        } else if is_f64::<T>() {
+            backend.fftn_axes_c2c_f64(packed.gpu_handle()?, spatial_shape, &suffix_axes, inverse)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op });
+        };
+        let transformed =
+            Tensor::from_storage(TensorStorage::gpu(h), packed.shape().to_vec(), false)?;
+        let transformed = if inverse {
+            scale_cuda_tensor(&transformed, axis_product as f64, op)?
+        } else {
+            transformed
+        };
+        current = crate::autograd::no_grad::no_grad(|| {
+            restore_complex_axes_cuda(&transformed, &pack_perm, op)
+        })?;
+    }
+    current.contiguous()
+}
+
+fn c2c_cuda_impl<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    norm: FftNorm,
+    default_axes: NdC2cDefaultAxes,
+    inverse: bool,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+
+    let spec = canonicalize_nd_c2c_args(input.shape(), s, axes, op, default_axes)?;
+    if spec.axes.is_empty() {
+        return Ok(Some(empty_c2c_fft_identity(input)?));
+    }
+
+    let resized = crate::autograd::no_grad::no_grad(|| {
+        resize_fft_input_cuda(input, &spec.axes, &spec.shape, op)
+    })?;
+    let mut out = cuda_c2c_axes_raw(&resized, &spec.axes, inverse, op)?;
+    let signal_numel = checked_shape_product(&spec.shape, op)?;
+    let scale = if inverse {
+        cuda_inverse_raw_norm_scale(norm, signal_numel)
     } else {
-        fftn_norm(&packed, None, Some(&last_axes), FftNorm::Backward)?
+        cuda_forward_norm_scale(norm, signal_numel)
     };
-    let transformed = if inverse {
-        scale_cuda_tensor(&transformed, axis_product as f64, op)?
-    } else {
-        transformed
-    };
-    crate::autograd::no_grad::no_grad(|| restore_complex_axes_cuda(&transformed, &pack_perm, op))
+    out = scale_cuda_tensor(&out, scale, op)?;
+    Ok(Some(out))
 }
 
 fn rfftn_cuda_impl<T: Float>(
@@ -1492,27 +1645,16 @@ pub fn fft2_norm<T: Float>(
         });
     }
 
-    let rows = shape[ndim - 3];
-    let cols = shape[ndim - 2];
-    let batch_dims: usize = crate::shape::numel(&shape[..ndim - 3]).max(1);
-
-    // GPU fast path via cufftPlan2d (#634): unbatched (or batch=1) f32/f64,
-    // default last-two axes / backward-norm / no resize only.
-    if input.is_cuda()
-        && batch_dims == 1
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && dim.is_none()
-        && s.is_none()
-    {
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let h = if is_f32::<T>() {
-            backend.fft2_c2c_f32(input.gpu_handle()?, rows, cols, false)?
-        } else {
-            backend.fft2_c2c_f64(input.gpu_handle()?, rows, cols, false)?
-        };
-        return Tensor::from_storage(TensorStorage::gpu(h), shape.to_vec(), false);
+    if let Some(out) = c2c_cuda_impl(
+        input,
+        s,
+        dim,
+        norm,
+        NdC2cDefaultAxes::LastTwo,
+        false,
+        "fft2",
+    )? {
+        return Ok(out);
     }
 
     let arr = tensor_to_complex_array(input, "fft2")?;
@@ -1559,25 +1701,16 @@ pub fn ifft2_norm<T: Float>(
         });
     }
 
-    let rows = shape[ndim - 3];
-    let cols = shape[ndim - 2];
-    let batch_dims: usize = crate::shape::numel(&shape[..ndim - 3]).max(1);
-
-    if input.is_cuda()
-        && batch_dims == 1
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && dim.is_none()
-        && s.is_none()
-    {
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let h = if is_f32::<T>() {
-            backend.fft2_c2c_f32(input.gpu_handle()?, rows, cols, true)?
-        } else {
-            backend.fft2_c2c_f64(input.gpu_handle()?, rows, cols, true)?
-        };
-        return Tensor::from_storage(TensorStorage::gpu(h), shape.to_vec(), false);
+    if let Some(out) = c2c_cuda_impl(
+        input,
+        s,
+        dim,
+        norm,
+        NdC2cDefaultAxes::LastTwo,
+        true,
+        "ifft2",
+    )? {
+        return Ok(out);
     }
 
     let arr = tensor_to_complex_array(input, "ifft2")?;
@@ -1727,9 +1860,9 @@ fn real_array_to_tensor<T: Float>(
 ///
 /// # GPU note
 ///
-/// The default 2-D/3-D and innermost axes-override CUDA f32/f64 cases dispatch
-/// to cuFFT (#636/#966). Other complex layouts still reject CUDA rather than
-/// silently falling through to host memory.
+/// CUDA f32/f64 inputs dispatch through resident resize/axis-pack/restore
+/// around cuFFT for arbitrary valid `s`/`axes`/`norm` combinations (#2004).
+/// Unsupported dtypes error instead of falling through to host memory.
 pub fn fftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1741,8 +1874,8 @@ pub fn fftn<T: Float>(
 /// N-dimensional complex-to-complex FFT with explicit `norm` (#1294).
 ///
 /// Matches `torch.fft.fftn(input, s, dim, norm)`
-/// (`torch/fft/__init__.py:246`). Only the default `norm=Backward` case
-/// dispatches to cuFFT; other norm modes take the ferray_fft CPU path.
+/// (`torch/fft/__init__.py:246`). CUDA f32/f64 inputs stay CUDA-resident for
+/// resize, arbitrary axes, and all normalization modes.
 pub fn fftn_norm<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1754,91 +1887,16 @@ pub fn fftn_norm<T: Float>(
     if resolved_axes.is_empty() {
         return empty_c2c_fft_identity(input);
     }
-    // GPU fast paths (#636, #966):
-    // - axes=None, s=None: dispatch by rank (rank-2 -> cufftPlanMany rank=2,
-    //   rank-3 -> cufftPlan3d).
-    // - axes=Some(...), s=None: axes-aware dispatch via cufftPlanMany (#966).
-    //   The axes list is normalized to non-negative indices and passed to
-    //   gpu_fftn_axes_c2c_f32/f64. s!=None still falls through to CPU
-    //   (pad/truncate requires a separate pre-pass not yet implemented on GPU).
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && s.is_none()
-        && norm == FftNorm::Backward
-    {
-        let shape = input.shape();
-        let ndim = shape.len();
-        // Last dim must be 2 (interleaved complex).
-        if ndim >= 2 && shape[ndim - 1] == 2 {
-            let spatial_ndim = ndim - 1; // dims excluding the trailing complex dim
-            let backend =
-                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-
-            if axes.is_none() {
-                // Default: transform all spatial dims.
-                if spatial_ndim == 2 {
-                    let h = shape[0];
-                    let w = shape[1];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn2d_c2c_f32(input.gpu_handle()?, h, w, false)?
-                    } else {
-                        backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, false)?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-                if spatial_ndim == 3 {
-                    let d = shape[0];
-                    let h = shape[1];
-                    let w = shape[2];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn3d_c2c_f32(input.gpu_handle()?, d, h, w, false)?
-                    } else {
-                        backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, false)?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-            } else if axes.is_some() {
-                // Axes-override path (#966): use the PyTorch-canonicalized
-                // non-negative axes validated above.
-                let norm_axes = resolved_axes.clone();
-                // cufftPlanMany with inembed=NULL, istride=1 is only correct
-                // when the transform axes are the innermost (last) spatial
-                // dimensions in contiguous order. For other axes layouts
-                // cuFFT would need stride/embed parameters encoding the full
-                // tensor layout, which requires a pre-permute step not yet
-                // implemented. Fall through to CPU for non-innermost axes.
-                // A set of axes is "innermost" iff it equals the last
-                // norm_axes.len() spatial dimensions: {spatial_ndim - r,
-                // ..., spatial_ndim - 1} in any order.
-                let r = norm_axes.len();
-                let innermost_set: std::collections::HashSet<usize> =
-                    (spatial_ndim - r..spatial_ndim).collect();
-                let axes_set: std::collections::HashSet<usize> =
-                    norm_axes.iter().copied().collect();
-                if norm_axes.iter().all(|&a| a < spatial_ndim) && axes_set == innermost_set {
-                    // Sort axes ascending so cufftPlanMany rank matches shape order.
-                    let mut sorted_axes = norm_axes.clone();
-                    sorted_axes.sort_unstable();
-                    let spatial_shape = &shape[..spatial_ndim];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn_axes_c2c_f32(
-                            input.gpu_handle()?,
-                            spatial_shape,
-                            &sorted_axes,
-                            false,
-                        )?
-                    } else {
-                        backend.fftn_axes_c2c_f64(
-                            input.gpu_handle()?,
-                            spatial_shape,
-                            &sorted_axes,
-                            false,
-                        )?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-            }
-        }
+    if let Some(out) = c2c_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2cDefaultAxes::AllOrShapeLen,
+        false,
+        "fftn",
+    )? {
+        return Ok(out);
     }
     let arr = tensor_to_complex_array(input, "fftn")?;
     let result =
@@ -1855,9 +1913,9 @@ pub fn fftn_norm<T: Float>(
 ///
 /// # GPU note
 ///
-/// The default 2-D/3-D and innermost axes-override CUDA f32/f64 cases dispatch
-/// to cuFFT (#636/#966). Other complex layouts still reject CUDA rather than
-/// silently falling through to host memory.
+/// CUDA f32/f64 inputs dispatch through resident resize/axis-pack/restore
+/// around cuFFT for arbitrary valid `s`/`axes`/`norm` combinations (#2004).
+/// Unsupported dtypes error instead of falling through to host memory.
 pub fn ifftn<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1868,8 +1926,8 @@ pub fn ifftn<T: Float>(
 
 /// N-dimensional inverse complex FFT with explicit `norm` (#1294).
 ///
-/// Matches `torch.fft.ifftn(input, s, dim, norm)`. Only the default
-/// `norm=Backward` case dispatches to cuFFT.
+/// Matches `torch.fft.ifftn(input, s, dim, norm)`. CUDA f32/f64 inputs stay
+/// CUDA-resident for resize, arbitrary axes, and all normalization modes.
 pub fn ifftn_norm<T: Float>(
     input: &Tensor<T>,
     s: Option<&[usize]>,
@@ -1881,75 +1939,16 @@ pub fn ifftn_norm<T: Float>(
     if resolved_axes.is_empty() {
         return empty_c2c_fft_identity(input);
     }
-    // GPU fast paths (#636, #966): mirrors fftn dispatch logic exactly,
-    // with inverse=true for all cuFFT calls.
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && s.is_none()
-        && norm == FftNorm::Backward
-    {
-        let shape = input.shape();
-        let ndim = shape.len();
-        if ndim >= 2 && shape[ndim - 1] == 2 {
-            let spatial_ndim = ndim - 1;
-            let backend =
-                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-
-            if axes.is_none() {
-                if spatial_ndim == 2 {
-                    let h = shape[0];
-                    let w = shape[1];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn2d_c2c_f32(input.gpu_handle()?, h, w, true)?
-                    } else {
-                        backend.fftn2d_c2c_f64(input.gpu_handle()?, h, w, true)?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-                if spatial_ndim == 3 {
-                    let d = shape[0];
-                    let h = shape[1];
-                    let w = shape[2];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn3d_c2c_f32(input.gpu_handle()?, d, h, w, true)?
-                    } else {
-                        backend.fftn3d_c2c_f64(input.gpu_handle()?, d, h, w, true)?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-            } else if axes.is_some() {
-                let norm_axes = resolved_axes.clone();
-                // Same innermost-axes restriction as fftn: GPU path only when
-                // axes form the last r spatial dimensions (cufftPlanMany
-                // inembed=NULL, istride=1 contract).
-                let r = norm_axes.len();
-                let innermost_set: std::collections::HashSet<usize> =
-                    (spatial_ndim - r..spatial_ndim).collect();
-                let axes_set: std::collections::HashSet<usize> =
-                    norm_axes.iter().copied().collect();
-                if norm_axes.iter().all(|&a| a < spatial_ndim) && axes_set == innermost_set {
-                    let mut sorted_axes = norm_axes.clone();
-                    sorted_axes.sort_unstable();
-                    let spatial_shape = &shape[..spatial_ndim];
-                    let h_out = if is_f32::<T>() {
-                        backend.fftn_axes_c2c_f32(
-                            input.gpu_handle()?,
-                            spatial_shape,
-                            &sorted_axes,
-                            true,
-                        )?
-                    } else {
-                        backend.fftn_axes_c2c_f64(
-                            input.gpu_handle()?,
-                            spatial_shape,
-                            &sorted_axes,
-                            true,
-                        )?
-                    };
-                    return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
-                }
-            }
-        }
+    if let Some(out) = c2c_cuda_impl(
+        input,
+        s,
+        axes,
+        norm,
+        NdC2cDefaultAxes::AllOrShapeLen,
+        true,
+        "ifftn",
+    )? {
+        return Ok(out);
     }
     let arr = tensor_to_complex_array(input, "ifftn")?;
     let result =
@@ -2156,8 +2155,8 @@ pub fn hfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<T
 
 /// 1-D Hermitian FFT with explicit `dim` and `norm` (#1294).
 ///
-/// Matches `torch.fft.hfft(input, n, dim, norm)`. Only the default last-axis
-/// / backward-norm case dispatches to cuFFT.
+/// Matches `torch.fft.hfft(input, n, dim, norm)`. CUDA f32/f64 inputs stay
+/// CUDA-resident for explicit `n`, non-last `dim`, and all normalization modes.
 pub fn hfft_norm<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
@@ -2277,8 +2276,8 @@ pub fn ihfft<T: Float>(input: &Tensor<T>, n: Option<usize>) -> FerrotorchResult<
 
 /// 1-D inverse Hermitian FFT with explicit `dim` and `norm` (#1294).
 ///
-/// Matches `torch.fft.ihfft(input, n, dim, norm)`. Only the default last-axis
-/// / backward-norm / no-resize case dispatches to cuFFT.
+/// Matches `torch.fft.ihfft(input, n, dim, norm)`. CUDA f32/f64 inputs stay
+/// CUDA-resident for explicit `n`, non-last `dim`, and all normalization modes.
 pub fn ihfft_norm<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,

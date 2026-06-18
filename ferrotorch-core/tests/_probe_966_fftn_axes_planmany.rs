@@ -203,16 +203,10 @@ fn p966_fftn_axes_neg1_3d_f32() {
     check_f32("p966_fftn_axes_neg1_3d_f32", &gpu_vals, &cpu_vals);
 }
 
-// Note on `ndim_3_axes_0` (axes=[0] on [d,h,w,2]):
-// axes=[0] is NOT innermost for a 3-D spatial tensor. The GPU path requires
-// innermost axes (cufftPlanMany inembed=NULL contract). Non-innermost axes
-// on a CUDA tensor return NotImplementedOnCuda — same as the pre-#966
-// behaviour for that specific case. The conformance_fft `ndim_3_axes_0`
-// fixture runs on CPU (device_label="cpu") and continues to pass. The CUDA
-// fixture for that tag was cascade-skipped in C.6 and is still skipped
-// because GPU support for non-innermost axes requires a pre-permute step
-// not yet implemented. The three innermost-axes fixtures DO run on GPU (#966
-// scope): ndim_3_axes_neg1, ndim_3_axes_n2_n1, and the 2-D axes=-1 case.
+// #2004 extends the #966 innermost-axis path: non-innermost axes are now
+// packed to contiguous suffix axes on device, transformed with cuFFT, and
+// restored without a host bridge. The conformance_fft `ndim_3_axes_0` CUDA
+// fixture now runs live against its PyTorch-generated expected values.
 
 // ---------------------------------------------------------------------------
 // #966: fftn with axes=Some(&[-2, -1]) on a 3-D complex tensor

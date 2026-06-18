@@ -48,9 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CUDA complex FFT non-innermost axes and s-resize are unimplemented (#2004)
+- backward_parallel worker failure can hang audit_autograd_engine_utilities (#2009)
 - CUDA graph capture default and tests diverge from PyTorch (#2012)
 - ferrotorch-gpu graph capture conformance invalidates CUDA stream (#2011)
-- backward_parallel worker failure can hang audit_autograd_engine_utilities (#2009)
 - Design doc cite-drift gate has stale ferrotorch-core anchors (#2008)
 - audit_core088 copysign CUDA test expects unsupported negative strides (#2007)
 - CUDA f64 transcendental forwards/backwards are missing (#2006)
