@@ -19,7 +19,7 @@
 //! | REQ-10 (`transpose`) | SHIPPED | materialises a row-major 2-D transpose (R-DEV-7 deviation from upstream's view); non-test consumer `MmBackward::backward` for `A^T @ grad_C` setup. |
 //! | REQ-11 (private broadcast helpers) | SHIPPED | `broadcast_batch_shapes`, `broadcast_strides`, `batch_linear_index`; consumed only by `broadcast_matmul`; exercised indirectly through `test_matmul_*_broadcast` and `test_matmul_4d`. |
 //! | REQ-12 (reduced-precision opmath helpers) | SHIPPED | `is_bf16::<T>()`, `is_f16::<T>()`, `is_reduced_precision::<T>()`, `opmath_up`, `opmath_down` — all `#[inline(always)]`; consumed by all three small-matrix paths in `mm_raw` / `mm_raw_bt` / `mm_raw_at` AND the `dot` / `mv` / `vm` / `bmm` f32-opmath accumulators (CORE-140 / #1834 widened the original bf16-only route to f16); per-block `// SAFETY:` comments name the index-bound invariant. |
-//! | REQ-13 (`MKL_ENABLED` runtime cfg probe + Fortran sgemm_/dgemm_ FFI path) | SHIPPED under `--features mkl` | const `MKL_ENABLED: bool` in `ops/linalg.rs` (true iff built with `--features mkl`); `mm_raw` / `mm_raw_bt` / `mm_raw_at` f32 and f64 branches gain a `#[cfg(feature = "mkl")]` fork that calls the Fortran `sgemm_` / `dgemm_` symbols of system MKL 2024.x directly via the helpers `mm_raw_mkl_f32` / `mm_raw_bt_mkl_f32` / `mm_raw_at_mkl_f32` and f64 mirrors. The dispatcher mirrors torch's exact call shape at `aten/src/ATen/native/CPUBlas.cpp:215-247` (raw `sgemm_` with operand-swap + dim-swap + lda/ldb-swap to convert ferrotorch's row-major into the col-major equivalent torch dispatches). Non-test production consumers identical to REQ-5/6/7 (the same `grad_fns::linalg` and `MmBackward` call-sites pick up the MKL path transparently when the feature is on). The parity-sweep runner `tolerance_for` reads `MKL_ENABLED` at runtime to tighten the matmul-family envelope from `rtol=1e-4` (faer fallback) to `tol_f32()` (the default `(1e-5, 1e-7)`). Closes #1538 and #1348. |
+//! | REQ-13 (`MKL_ENABLED` runtime cfg probe + Fortran sgemm_/dgemm_ FFI path) | SHIPPED under `--features mkl` | const `MKL_ENABLED: bool` in `ops/linalg.rs` (true iff built with `--features mkl`); `mm_raw` / `mm_raw_bt` / `mm_raw_at` f32 and f64 branches gain a `#[cfg(feature = "mkl")]` fork that calls the Fortran `sgemm_` / `dgemm_` symbols of system MKL 2024.x directly via the helpers `mm_raw_mkl_f32` / `mm_raw_bt_mkl_f32` / `mm_raw_at_mkl_f32` and f64 mirrors when the requested GEMM fits BLAS's `int` ABI, otherwise falls through to the non-BLAS Rust/faer path like PyTorch's `use_blas_gemm` fallback. The dispatcher mirrors torch's exact call shape at `aten/src/ATen/native/CPUBlas.cpp:215-247` (raw `sgemm_` with operand-swap + dim-swap + lda/ldb-swap to convert ferrotorch's row-major into the col-major equivalent torch dispatches). Non-test production consumers identical to REQ-5/6/7 (the same `grad_fns::linalg` and `MmBackward` call-sites pick up the MKL path transparently when the feature is on). The parity-sweep runner `tolerance_for` reads `MKL_ENABLED` at runtime to tighten the matmul-family envelope from `rtol=1e-4` (faer fallback) to `tol_f32()` (the default `(1e-5, 1e-7)`) for BLAS-sized GEMMs. Closes #1538 and #1348. |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -30,8 +30,9 @@ use crate::tensor::Tensor;
 /// parity-sweep runner's `tolerance_for`). When `--features mkl` is on
 /// for ferrotorch-core, the `mm_raw` family routes f32/f64 through the
 /// Fortran `sgemm_`/`dgemm_` symbols of system MKL 2024.x using torch's
-/// exact dispatch shape, so parity vs PyTorch's MKL link is
-/// byte-for-byte; when off, faer is the BLAS backend and the
+/// exact dispatch shape for BLAS-sized GEMMs, so parity vs PyTorch's
+/// MKL link is byte-for-byte for those calls; when off, faer is the BLAS
+/// backend and the
 /// matmul-family parity envelope widens to `rtol=1e-4` to absorb the
 /// cross-BLAS-implementation f32 ULP variance documented in
 /// `tools/parity-sweep/runner/src/main.rs::tolerance_for`.
@@ -849,13 +850,56 @@ fn checked_dim_product(
     lhs * rhs
 }
 
+#[cfg(feature = "mkl")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MklGemmI32Args {
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+}
+
+#[cfg(feature = "mkl")]
+fn checked_mkl_gemm_i32_args(
+    transa: u8,
+    transb: u8,
+    m: usize,
+    n: usize,
+    k: usize,
+    lda: usize,
+    ldb: usize,
+    ldc: usize,
+) -> Option<MklGemmI32Args> {
+    let transa_t = transa != b'N';
+    let transb_t = transb != b'N';
+    let min_lda = if transa_t { k } else { m }.max(1);
+    let min_ldb = if transb_t { n } else { k }.max(1);
+    let min_ldc = m.max(1);
+    if lda < min_lda || ldb < min_ldb || ldc < min_ldc {
+        return None;
+    }
+    Some(MklGemmI32Args {
+        m: i32::try_from(m).ok()?,
+        n: i32::try_from(n).ok()?,
+        k: i32::try_from(k).ok()?,
+        lda: i32::try_from(lda).ok()?,
+        ldb: i32::try_from(ldb).ok()?,
+        ldc: i32::try_from(ldc).ok()?,
+    })
+}
+
 // MKL Fortran-symbol helpers — used by `mm_raw`/`mm_raw_bt`/`mm_raw_at`
 // under `--features mkl` to route the entire f32/f64 path (any matrix
-// size) through MKL's `sgemm_`/`dgemm_` Fortran symbols for byte-for-
-// byte parity with PyTorch's MKL CPU build (when torch links MKL).
+// size whose GEMM metadata fits the BLAS `int` ABI) through MKL's
+// `sgemm_`/`dgemm_` Fortran symbols for byte-for-byte parity with
+// PyTorch's MKL CPU build (when torch links MKL). Oversized metadata
+// falls back to the non-BLAS Rust/faer path, mirroring PyTorch's
+// `use_blas_gemm` fallback instead of narrowing dimensions.
 // The cross-implementation f32 ULP drift originates from k>=10 dot
 // products, which means it hits even the small-matrix sizes that
-// op_db samples — we therefore unconditionally dispatch every f32/f64
+// op_db samples — we therefore dispatch every BLAS-sized f32/f64
 // GEMM through MKL when the feature is on. Each helper takes the
 // caller's T-typed slices and reinterprets them at the FFI boundary;
 // the TypeId guard at the dispatch site upstream proves T == f32 or
@@ -889,16 +933,21 @@ fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f32>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     // MKL rejects degenerate shapes; for an empty contraction (k=0)
     // the result is all-zero (matches torch's empty-reduction
     // semantics); for m=0/n=0 the result is empty.
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = if m == 1 || n == 1 {
+        checked_mkl_gemm_i32_args(b'T', b'T', m, n, k, k, n, m)?
+    } else {
+        checked_mkl_gemm_i32_args(b'N', b'N', n, m, k, n, k, n)?
+    };
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: TypeId guard at caller proves T == f32; &[T] reinterprets
     // as &[f32] with identical layout.
     let a_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f32]) };
@@ -929,53 +978,55 @@ fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     if m == 1 || n == 1 {
         // SAFETY: leaf FFI to MKL's `sgemm_`. (T,T)+no-swap mirrors
         // torch's `addmm_impl_cpu_` derivation at LinearAlgebra.cpp:1450-1557
-        // → CPUBlas.cpp:238 for thin matmul. m/n/k cast to i32 is sound
-        // for any host-memory-bounded tensor shape. Buffer lengths
-        // (a=m*k, b=k*n, c=m*n) are enforced by `mm_raw`'s entry
-        // assertions (CORE-138).
+        // → CPUBlas.cpp:238 for thin matmul. `gemm` is produced by
+        // `checked_mkl_gemm_i32_args`, so every BLAS int and leading
+        // dimension obeys PyTorch's `use_blas_gemm` constraints.
+        // Buffer lengths (a=m*k, b=k*n, c=m*n) are enforced by
+        // `mm_raw`'s entry assertions (CORE-138).
         unsafe {
             call_sgemm(
                 b'T',
                 b'T',
-                m as i32,
-                n as i32,
-                k as i32,
+                gemm.m,
+                gemm.n,
+                gemm.k,
                 1.0,
                 a_f32.as_ptr(),
-                k as i32,
+                gemm.lda,
                 b_f32.as_ptr(),
-                n as i32,
+                gemm.ldb,
                 0.0,
                 c_f32.as_mut_ptr(),
-                m as i32,
+                gemm.ldc,
             );
         }
-        return result;
+        return Some(result);
     }
     // SAFETY: leaf FFI shim to MKL's Fortran `sgemm_`. Dispatch is the
     // operand-swap + dim-swap pattern documented in this function's
-    // doc-comment. m/n/k cast to i32 is sound for any host-memory-
-    // bounded tensor shape. beta=0.0 writes (not accumulates). Buffer
-    // lengths (a=m*k, b=k*n, c=m*n) are enforced by `mm_raw`'s entry
-    // assertions (CORE-138).
+    // doc-comment. `gemm` is produced by `checked_mkl_gemm_i32_args`,
+    // so every BLAS int and leading dimension obeys PyTorch's
+    // `use_blas_gemm` constraints. beta=0.0 writes (not accumulates).
+    // Buffer lengths (a=m*k, b=k*n, c=m*n) are enforced by `mm_raw`'s
+    // entry assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'N',
             b'N',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f32.as_ptr(),
-            n as i32,
+            gemm.lda,
             a_f32.as_ptr(),
-            k as i32,
+            gemm.ldb,
             0.0,
             c_f32.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// f64 mirror of `mm_raw_mkl_f32`.
@@ -986,13 +1037,18 @@ fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f64>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = if m == 1 || n == 1 {
+        checked_mkl_gemm_i32_args(b'T', b'T', m, n, k, k, n, m)?
+    } else {
+        checked_mkl_gemm_i32_args(b'N', b'N', n, m, k, n, k, n)?
+    };
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: T == f64 by caller's TypeId guard.
     let a_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f64]) };
     // SAFETY: same as a_f64.
@@ -1011,42 +1067,43 @@ fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
             call_dgemm(
                 b'T',
                 b'T',
-                m as i32,
-                n as i32,
-                k as i32,
+                gemm.m,
+                gemm.n,
+                gemm.k,
                 1.0,
                 a_f64.as_ptr(),
-                k as i32,
+                gemm.lda,
                 b_f64.as_ptr(),
-                n as i32,
+                gemm.ldb,
                 0.0,
                 c_f64.as_mut_ptr(),
-                m as i32,
+                gemm.ldc,
             );
         }
-        return result;
+        return Some(result);
     }
     // SAFETY: leaf FFI shim to MKL's `dgemm_`; same invariants as
-    // `mm_raw_mkl_f32` but f64. Buffer lengths (a=m*k, b=k*n, c=m*n)
-    // are enforced by `mm_raw`'s entry assertions (CORE-138).
+    // `mm_raw_mkl_f32` but f64. `gemm` is already checked against the
+    // BLAS int ABI. Buffer lengths (a=m*k, b=k*n, c=m*n) are enforced
+    // by `mm_raw`'s entry assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'N',
             b'N',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f64.as_ptr(),
-            n as i32,
+            gemm.lda,
             a_f64.as_ptr(),
-            k as i32,
+            gemm.ldb,
             0.0,
             c_f64.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// `mm_raw_bt` MKL path for f32: A is (M,K) row-major, B is (N,K)
@@ -1066,13 +1123,14 @@ fn mm_raw_bt_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f32>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = checked_mkl_gemm_i32_args(b'T', b'N', n, m, k, k, k, n)?;
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: T == f32 by caller's TypeId guard.
     let a_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f32]) };
     // SAFETY: same as a_f32.
@@ -1081,26 +1139,27 @@ fn mm_raw_bt_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     let c_f32 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
     // SAFETY: leaf FFI to MKL's `sgemm_`. transa='T' applied to the
     // col-major B view (of row-major (N,K), which is col-major (K,N)).
-    // Buffer lengths (a=m*k, b=n*k, c=m*n) are enforced by
-    // `mm_raw_bt`'s entry assertions (CORE-138).
+    // `gemm` is checked against PyTorch's BLAS-int and leading-dimension
+    // constraints. Buffer lengths (a=m*k, b=n*k, c=m*n) are enforced
+    // by `mm_raw_bt`'s entry assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'T',
             b'N',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f32.as_ptr(),
-            k as i32,
+            gemm.lda,
             a_f32.as_ptr(),
-            k as i32,
+            gemm.ldb,
             0.0,
             c_f32.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// f64 mirror of `mm_raw_bt_mkl_f32`.
@@ -1111,13 +1170,14 @@ fn mm_raw_bt_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f64>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = checked_mkl_gemm_i32_args(b'T', b'N', n, m, k, k, k, n)?;
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: T == f64 by caller's TypeId guard.
     let a_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f64]) };
     // SAFETY: same as a_f64.
@@ -1125,26 +1185,27 @@ fn mm_raw_bt_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     // SAFETY: T == f64; result is fresh and unaliased.
     let c_f64 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
     // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
-    // Buffer lengths (a=m*k, b=n*k, c=m*n) are enforced by
-    // `mm_raw_bt`'s entry assertions (CORE-138).
+    // `gemm` is checked against the BLAS int ABI. Buffer lengths
+    // (a=m*k, b=n*k, c=m*n) are enforced by `mm_raw_bt`'s entry
+    // assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'T',
             b'N',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f64.as_ptr(),
-            k as i32,
+            gemm.lda,
             a_f64.as_ptr(),
-            k as i32,
+            gemm.ldb,
             0.0,
             c_f64.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// `mm_raw_at` MKL path for f32: A is (K,M) row-major, B is (K,N)
@@ -1172,13 +1233,14 @@ fn mm_raw_at_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f32>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = checked_mkl_gemm_i32_args(b'N', b'T', n, m, k, n, m, n)?;
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: T == f32 by caller's TypeId guard.
     let a_f32 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f32]) };
     // SAFETY: same as a_f32.
@@ -1187,26 +1249,27 @@ fn mm_raw_at_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     let c_f32 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
     // SAFETY: leaf FFI to MKL's `sgemm_`. transb='T' applied to the
     // col-major A view (of row-major (K,M), which is col-major (M,K)).
-    // Buffer lengths (a=k*m, b=k*n, c=m*n) are enforced by
-    // `mm_raw_at`'s entry assertions (CORE-138).
+    // `gemm` is checked against PyTorch's BLAS-int and leading-dimension
+    // constraints. Buffer lengths (a=k*m, b=k*n, c=m*n) are enforced
+    // by `mm_raw_at`'s entry assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'N',
             b'T',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f32.as_ptr(),
-            n as i32,
+            gemm.lda,
             a_f32.as_ptr(),
-            m as i32,
+            gemm.ldb,
             0.0,
             c_f32.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// f64 mirror of `mm_raw_at_mkl_f32`.
@@ -1217,13 +1280,14 @@ fn mm_raw_at_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     m: usize,
     k: usize,
     n: usize,
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     debug_assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<f64>());
     let zero_t = <T as num_traits::Zero>::zero();
-    let mut result: Vec<T> = vec![zero_t; m * n];
     if m == 0 || n == 0 || k == 0 {
-        return result;
+        return Some(vec![zero_t; m * n]);
     }
+    let gemm = checked_mkl_gemm_i32_args(b'N', b'T', n, m, k, n, m, n)?;
+    let mut result: Vec<T> = vec![zero_t; m * n];
     // SAFETY: T == f64 by caller's TypeId guard.
     let a_f64 = unsafe { &*(std::ptr::from_ref::<[T]>(a_data) as *const [f64]) };
     // SAFETY: same as a_f64.
@@ -1231,26 +1295,27 @@ fn mm_raw_at_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     // SAFETY: T == f64; result is fresh and unaliased.
     let c_f64 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
     // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
-    // Buffer lengths (a=k*m, b=k*n, c=m*n) are enforced by
-    // `mm_raw_at`'s entry assertions (CORE-138).
+    // `gemm` is checked against the BLAS int ABI. Buffer lengths
+    // (a=k*m, b=k*n, c=m*n) are enforced by `mm_raw_at`'s entry
+    // assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'N',
             b'T',
-            n as i32,
-            m as i32,
-            k as i32,
+            gemm.m,
+            gemm.n,
+            gemm.k,
             1.0,
             b_f64.as_ptr(),
-            n as i32,
+            gemm.lda,
             a_f64.as_ptr(),
-            m as i32,
+            gemm.ldb,
             0.0,
             c_f64.as_mut_ptr(),
-            n as i32,
+            gemm.ldc,
         );
     }
-    result
+    Some(result)
 }
 
 /// Raw matrix multiply on borrowed slices: (M,K) @ (K,N) -> Vec<T>.
@@ -1285,23 +1350,30 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
         b_expected,
         "mm_raw: b_data.len() must equal k*n for row-major B of shape (K,N)=({k},{n}) (m={m})"
     );
-    // Under `--features mkl`, every f32 and f64 multiply (regardless of
-    // matrix size) routes through `cblas_sgemm`/`cblas_dgemm` for
-    // byte-for-byte parity with PyTorch's MKL CPU build (closes #1348).
+    // Under `--features mkl`, every BLAS-sized f32 and f64 multiply
+    // routes through raw Fortran `sgemm_`/`dgemm_` for byte-for-byte
+    // parity with PyTorch's MKL CPU build (closes #1348). If the GEMM
+    // metadata does not fit BLAS's signed-int ABI, mirror PyTorch's
+    // `use_blas_gemm` gate and fall through to the non-BLAS Rust/faer path
+    // instead of narrowing dimensions.
     // We deliberately bypass the DIRECT_MM_THRESHOLD small-matrix loop
     // here because the small ikj loop is precisely where the cross-
     // implementation drift originates (a k=10 dot in ferrotorch's loop
     // vs MKL's k=10 dot diverge by ~3e-6 at f32 due to different
     // accumulation orders and FMA fusion). The f16/bf16 small-matrix path
-    // keeps its f32-opmath-accumulator route (MKL has no half sgemm via
-    // cblas anyway), and the f16/bf16 large-matrix upcast fallback stays.
+    // keeps its f32-opmath-accumulator route (classic BLAS has no half
+    // sgemm), and the f16/bf16 large-matrix upcast fallback stays.
     #[cfg(feature = "mkl")]
     {
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
-            return mm_raw_mkl_f32::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            && let Some(result) = mm_raw_mkl_f32::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
-            return mm_raw_mkl_f64::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
+            && let Some(result) = mm_raw_mkl_f64::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
     }
     let max_dim = m.max(n).max(k);
@@ -1381,9 +1453,10 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
             // unique &mut [f32] view is sound.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            // Under `--features mkl` the function head short-circuited
-            // f32 through `mm_raw_mkl_f32`, so this large-matrix faer
-            // branch only runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f32 dispatch
+            // short-circuits through `mm_raw_mkl_f32`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
             let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f32, m, n);
@@ -1407,9 +1480,10 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            // Under `--features mkl` the function head short-circuited
-            // f64 through `mm_raw_mkl_f64`, so this faer branch only
-            // runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f64 dispatch
+            // short-circuits through `mm_raw_mkl_f64`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
             let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
@@ -1478,16 +1552,22 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
         b_expected,
         "mm_raw_bt: b_data.len() must equal n*k for row-major B of shape (N,K)=({n},{k}) (m={m})"
     );
-    // Under `--features mkl`, route every f32/f64 multiply through MKL
-    // for byte-for-byte parity vs torch. See the equivalent guard in
-    // `mm_raw` for the full rationale (closes #1348).
+    // Under `--features mkl`, route every BLAS-sized f32/f64 multiply
+    // through MKL for byte-for-byte parity vs torch. Oversized metadata
+    // falls through to faer, matching PyTorch's `use_blas_gemm` gate.
+    // See the equivalent guard in `mm_raw` for the full rationale
+    // (closes #1348).
     #[cfg(feature = "mkl")]
     {
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
-            return mm_raw_bt_mkl_f32::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            && let Some(result) = mm_raw_bt_mkl_f32::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
-            return mm_raw_bt_mkl_f64::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
+            && let Some(result) = mm_raw_bt_mkl_f64::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
     }
     let max_dim = m.max(n).max(k);
@@ -1564,9 +1644,10 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f32] is unique for the duration of this block.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            // Under `--features mkl` the function head short-circuited
-            // f32 through `mm_raw_bt_mkl_f32`, so this faer branch only
-            // runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f32 dispatch
+            // short-circuits through `mm_raw_bt_mkl_f32`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, m, k);
             // B is (N,K) row-major; transpose gives (K,N) view — zero copy.
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, n, k).transpose();
@@ -1591,9 +1672,10 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            // Under `--features mkl` the function head short-circuited
-            // f64 through `mm_raw_bt_mkl_f64`, so this faer branch only
-            // runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f64 dispatch
+            // short-circuits through `mm_raw_bt_mkl_f64`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, m, k);
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, n, k).transpose();
             let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
@@ -1671,16 +1753,22 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
         b_expected,
         "mm_raw_at: b_data.len() must equal k*n for row-major B of shape (K,N)=({k},{n}) (m={m})"
     );
-    // Under `--features mkl`, route every f32/f64 multiply through MKL
-    // for byte-for-byte parity vs torch. See the equivalent guard in
-    // `mm_raw` for the full rationale (closes #1348).
+    // Under `--features mkl`, route every BLAS-sized f32/f64 multiply
+    // through MKL for byte-for-byte parity vs torch. Oversized metadata
+    // falls through to faer, matching PyTorch's `use_blas_gemm` gate.
+    // See the equivalent guard in `mm_raw` for the full rationale
+    // (closes #1348).
     #[cfg(feature = "mkl")]
     {
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
-            return mm_raw_at_mkl_f32::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+            && let Some(result) = mm_raw_at_mkl_f32::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
-        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
-            return mm_raw_at_mkl_f64::<T>(a_data, b_data, m, k, n);
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
+            && let Some(result) = mm_raw_at_mkl_f64::<T>(a_data, b_data, m, k, n)
+        {
+            return result;
         }
     }
     let max_dim = m.max(n).max(k);
@@ -1755,9 +1843,10 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f32] is unique for the duration of this block.
             let c_f32 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
-            // Under `--features mkl` the function head short-circuited
-            // f32 through `mm_raw_at_mkl_f32`, so this faer branch only
-            // runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f32 dispatch
+            // short-circuits through `mm_raw_at_mkl_f32`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             // A is (K,M) row-major; transpose gives (M,K) view — zero copy.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f32, k, m).transpose();
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f32, k, n);
@@ -1782,9 +1871,10 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // produced &mut [f64] is unique for the duration of this block.
             let c_f64 =
                 unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
-            // Under `--features mkl` the function head short-circuited
-            // f64 through `mm_raw_at_mkl_f64`, so this faer branch only
-            // runs in the no-mkl build.
+            // Under `--features mkl`, BLAS-sized f64 dispatch
+            // short-circuits through `mm_raw_at_mkl_f64`. This faer branch
+            // also handles oversized-BLAS metadata, matching PyTorch's
+            // `use_blas_gemm` fallback.
             let a_mat = faer::mat::MatRef::from_row_major_slice(a_f64, k, m).transpose();
             let b_mat = faer::mat::MatRef::from_row_major_slice(b_f64, k, n);
             let mut c_mat = faer::mat::MatMut::from_row_major_slice_mut(c_f64, m, n);
@@ -2387,6 +2477,101 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let b = t(&[1.0; 2 * 2], &[1, 2, 2]);
         assert!(bmm(&a, &b).is_err());
+    }
+
+    #[cfg(feature = "mkl")]
+    #[test]
+    fn test_mkl_gemm_i32_args_accept_pytorch_cpu_blas_shapes() {
+        // Dense row-major mm lowers to the column-major equivalent
+        // sgemm_('N','N', N, M, K, B, A, C) that PyTorch emits through
+        // CPUBlas.cpp when use_blas_gemm accepts the metadata.
+        assert_eq!(
+            checked_mkl_gemm_i32_args(b'N', b'N', 5, 3, 4, 5, 4, 5),
+            Some(MklGemmI32Args {
+                m: 5,
+                n: 3,
+                k: 4,
+                lda: 5,
+                ldb: 4,
+                ldc: 5,
+            })
+        );
+
+        // Thin mm follows PyTorch's addmm_impl_cpu_ T/T arm; this is the
+        // branch with a different MKL kernel and the strictest parity risk.
+        assert_eq!(
+            checked_mkl_gemm_i32_args(b'T', b'T', 1, 2, 4, 4, 2, 1),
+            Some(MklGemmI32Args {
+                m: 1,
+                n: 2,
+                k: 4,
+                lda: 4,
+                ldb: 2,
+                ldc: 1,
+            })
+        );
+
+        assert_eq!(
+            checked_mkl_gemm_i32_args(b'T', b'N', 5, 3, 4, 4, 4, 5),
+            Some(MklGemmI32Args {
+                m: 5,
+                n: 3,
+                k: 4,
+                lda: 4,
+                ldb: 4,
+                ldc: 5,
+            })
+        );
+        assert_eq!(
+            checked_mkl_gemm_i32_args(b'N', b'T', 5, 3, 4, 5, 3, 5),
+            Some(MklGemmI32Args {
+                m: 5,
+                n: 3,
+                k: 4,
+                lda: 5,
+                ldb: 3,
+                ldc: 5,
+            })
+        );
+    }
+
+    #[cfg(feature = "mkl")]
+    #[test]
+    fn test_mkl_gemm_i32_args_reject_over_intmax_and_bad_leading_dims() {
+        let too_big = i32::MAX as usize + 1;
+
+        assert!(
+            checked_mkl_gemm_i32_args(b'N', b'N', too_big, 1, 1, too_big, 1, too_big).is_none()
+        );
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 1, too_big, 1, 1, 1, 1).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 1, 1, too_big, 1, too_big, 1).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 1, 1, 1, too_big, 1, 1).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 1, 1, 1, 1, too_big, 1).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 1, 1, 1, 1, 1, too_big).is_none());
+
+        // Leading-dimension checks mirror PyTorch's use_blas_gemm guard:
+        // lda >= max(1, transa ? k : m), ldb >= max(1, transb ? n : k),
+        // ldc >= max(1, m).
+        assert!(checked_mkl_gemm_i32_args(b'T', b'N', 5, 3, 4, 3, 4, 5).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'T', 5, 3, 4, 5, 2, 5).is_none());
+        assert!(checked_mkl_gemm_i32_args(b'N', b'N', 5, 3, 4, 5, 4, 4).is_none());
+    }
+
+    #[cfg(feature = "mkl")]
+    #[test]
+    fn test_mkl_helpers_return_none_for_oversized_metadata_before_allocating() {
+        let too_big = i32::MAX as usize + 1;
+        let a32 = [1.0f32];
+        let b32 = [1.0f32];
+        let a64 = [1.0f64];
+        let b64 = [1.0f64];
+
+        assert!(mm_raw_mkl_f32::<f32>(&a32, &b32, too_big, 1, 1).is_none());
+        assert!(mm_raw_mkl_f64::<f64>(&a64, &b64, too_big, 1, 1).is_none());
+        assert!(mm_raw_bt_mkl_f32::<f32>(&a32, &b32, too_big, 1, 1).is_none());
+        assert!(mm_raw_bt_mkl_f64::<f64>(&a64, &b64, too_big, 1, 1).is_none());
+        assert!(mm_raw_at_mkl_f32::<f32>(&a32, &b32, too_big, 1, 1).is_none());
+        assert!(mm_raw_at_mkl_f64::<f64>(&a64, &b64, too_big, 1, 1).is_none());
     }
 
     // -------------------------------------------------------------------
