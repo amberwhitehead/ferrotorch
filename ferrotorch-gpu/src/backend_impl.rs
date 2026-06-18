@@ -13575,6 +13575,13 @@ impl GpuBackend for CudaBackendImpl {
                 suffix,
                 dev,
             ),
+            DType::I16 => bk::gpu_cmp_i16(
+                Self::unwrap_buffer_i16(a)?.inner(),
+                Self::unwrap_buffer_i16(b)?.inner(),
+                n,
+                suffix,
+                dev,
+            ),
             DType::I32 => bk::gpu_cmp_i32(
                 Self::unwrap_buffer_i32(a)?.inner(),
                 Self::unwrap_buffer_i32(b)?.inner(),
@@ -13656,6 +13663,17 @@ impl GpuBackend for CudaBackendImpl {
         let ord = a.device_ordinal();
         let suffix = op.suffix();
         let r = match a.dtype() {
+            DType::I16 => bk::gpu_cmp_broadcast_i16(
+                Self::unwrap_buffer_i16(a)?.inner(),
+                Self::unwrap_buffer_i16(b)?.inner(),
+                a_numel,
+                b_numel,
+                out_shape,
+                &a_strides,
+                &b_strides,
+                suffix,
+                dev,
+            ),
             DType::I32 => bk::gpu_cmp_broadcast_i32(
                 Self::unwrap_buffer_i32(a)?.inner(),
                 Self::unwrap_buffer_i32(b)?.inner(),

@@ -117,6 +117,33 @@ fn int_compare_broadcasts() {
     let le = BoolTensor::le_int(&a, &b2).expect("le_int [2,2]x[2,1] broadcasts in torch");
     assert_eq!(le.shape(), &[2, 2]);
     assert_eq!(le.data().unwrap(), &[true, true, true, true]);
+
+    let a16 = IntTensor::<i16>::from_vec(vec![-3, 0, 2, i16::MAX], vec![2, 2]).unwrap();
+    let b16 = IntTensor::<i16>::from_vec(vec![-3, 7], vec![2, 1]).unwrap();
+    assert_eq!(
+        BoolTensor::eq_int(&a16, &b16).unwrap().data().unwrap(),
+        &[true, false, false, false]
+    );
+    assert_eq!(
+        BoolTensor::ne_int(&a16, &b16).unwrap().data().unwrap(),
+        &[false, true, true, true]
+    );
+    assert_eq!(
+        BoolTensor::lt_int(&a16, &b16).unwrap().data().unwrap(),
+        &[false, false, true, false]
+    );
+    assert_eq!(
+        BoolTensor::le_int(&a16, &b16).unwrap().data().unwrap(),
+        &[true, false, true, false]
+    );
+    assert_eq!(
+        BoolTensor::gt_int(&a16, &b16).unwrap().data().unwrap(),
+        &[false, true, false, true]
+    );
+    assert_eq!(
+        BoolTensor::ge_int(&a16, &b16).unwrap().data().unwrap(),
+        &[true, true, false, true]
+    );
 }
 
 /// Logical binary ops broadcast: `[2,2]` vs `[2]` and `[2,2]` vs 0-d.
@@ -234,9 +261,9 @@ mod gpu {
     }
 
     /// Integer compare broadcast on CUDA. The values are torch-exact and the
-    /// mask is returned on the operands' device; the expansion is a
-    /// DOCUMENTED host round trip (R-LOUD-2 — no integer broadcast kernel
-    /// exists yet; see `compare_int`'s doc-comment and the follow-up issue).
+    /// mask is returned on the operands' device; broadcasted integer operands
+    /// use the resident rank-general compare kernel, with no host value round
+    /// trip.
     ///
     /// Live torch 2.11.0+cu130 (RTX 3090):
     /// ```text
@@ -265,6 +292,125 @@ mod gpu {
         assert_eq!(
             gt.to(Device::Cpu).unwrap().data().unwrap(),
             &[false, false, true, true]
+        );
+    }
+
+    /// Signed i16 comparisons are a first-class CUDA TensorIterator case in
+    /// PyTorch, both for equal-shape operands and broadcast operands.
+    ///
+    /// Live torch 2.11.0+cu130 (RTX 3090):
+    /// ```text
+    /// >>> a = torch.tensor([[-3, 0], [2, 32767]], dtype=torch.int16, device='cuda')
+    /// >>> b = torch.tensor([[-3], [7]], dtype=torch.int16, device='cuda')
+    /// >>> [op(a, b).cpu().tolist() for op in (torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge)]
+    /// [[[True, False], [False, False]], [[False, True], [True, True]],
+    ///  [[False, False], [True, False]], [[True, False], [True, False]],
+    ///  [[False, True], [False, True]], [[True, True], [False, True]]]
+    /// ```
+    #[test]
+    fn int16_compare_same_shape_and_broadcast_on_cuda() {
+        ensure_cuda_backend();
+        let same_a = IntTensor::<i16>::from_vec(vec![i16::MIN, -1, 0, 9], vec![4])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let same_b = IntTensor::<i16>::from_vec(vec![i16::MIN, 0, 0, 5], vec![4])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let same_gt = BoolTensor::gt_int(&same_a, &same_b).expect("same-shape i16 gt runs on CUDA");
+        assert!(same_gt.is_cuda());
+        assert_eq!(
+            same_gt.to(Device::Cpu).unwrap().data().unwrap(),
+            &[false, false, false, true]
+        );
+        let same_ne = BoolTensor::ne_int(&same_a, &same_b).expect("same-shape i16 ne runs on CUDA");
+        assert!(same_ne.is_cuda());
+        assert_eq!(
+            same_ne.to(Device::Cpu).unwrap().data().unwrap(),
+            &[false, true, false, true]
+        );
+
+        let a = IntTensor::<i16>::from_vec(vec![-3, 0, 2, i16::MAX], vec![2, 2])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let b = IntTensor::<i16>::from_vec(vec![-3, 7], vec![2, 1])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+
+        let checks: [(&str, BoolTensor, &[bool]); 6] = [
+            (
+                "eq",
+                BoolTensor::eq_int(&a, &b).unwrap(),
+                &[true, false, false, false],
+            ),
+            (
+                "ne",
+                BoolTensor::ne_int(&a, &b).unwrap(),
+                &[false, true, true, true],
+            ),
+            (
+                "lt",
+                BoolTensor::lt_int(&a, &b).unwrap(),
+                &[false, false, true, false],
+            ),
+            (
+                "le",
+                BoolTensor::le_int(&a, &b).unwrap(),
+                &[true, false, true, false],
+            ),
+            (
+                "gt",
+                BoolTensor::gt_int(&a, &b).unwrap(),
+                &[false, true, false, true],
+            ),
+            (
+                "ge",
+                BoolTensor::ge_int(&a, &b).unwrap(),
+                &[true, true, false, true],
+            ),
+        ];
+
+        for (name, mask, expected) in checks {
+            assert!(mask.is_cuda(), "i16 {name} broadcast result left CUDA");
+            assert_eq!(mask.shape(), &[2, 2], "i16 {name} broadcast shape");
+            assert_eq!(
+                mask.to(Device::Cpu).unwrap().data().unwrap(),
+                expected,
+                "i16 {name} broadcast values"
+            );
+        }
+    }
+
+    /// Covers the pre-existing i64 rank-general path with 0-d scalar broadcast.
+    ///
+    /// Live torch 2.11.0+cu130:
+    /// ```text
+    /// >>> torch.le(torch.tensor([[1,2],[3,4]], dtype=torch.int64, device='cuda'),
+    /// ...          torch.tensor(3, dtype=torch.int64, device='cuda'))
+    /// tensor([[ True,  True],
+    ///         [ True, False]], device='cuda:0')
+    /// ```
+    #[test]
+    fn int64_compare_zero_dim_broadcast_on_cuda() {
+        ensure_cuda_backend();
+        let a = IntTensor::<i64>::from_vec(vec![1, 2, 3, 4], vec![2, 2])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let scalar = IntTensor::<i64>::from_vec(vec![3], vec![])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let le =
+            BoolTensor::le_int(&a, &scalar).expect("cuda le_int [2,2]x0-d broadcasts in torch");
+        assert!(le.is_cuda());
+        assert_eq!(le.shape(), &[2, 2]);
+        assert_eq!(
+            le.to(Device::Cpu).unwrap().data().unwrap(),
+            &[true, true, true, false]
         );
     }
 

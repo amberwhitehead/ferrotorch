@@ -10,12 +10,13 @@
 //! # Operations
 //!
 //! - **Comparison** (value dtype in, u8 0/1 out): for each value dtype
-//!   `f32 / f64 / bf16 / f16 / i32 / i64`, the six operators
+//!   `f32 / f64 / bf16 / f16 / i16 / i32 / i64`, the six operators
 //!   `eq / ne / lt / le / gt / ge`. bf16/f16 inputs (u16 bit patterns) are
 //!   decoded to f32 first, then compared (matching the bf16/f16 elementwise
 //!   kernels). The output buffer is `CudaSlice<u8>` (1 byte per element).
-//!   Broadcasted i32/i64 comparisons use the rank-general broadcast comparison
-//!   launcher below, matching PyTorch's TensorIterator CUDA residency.
+//!   Broadcasted i16/i32/i64 comparisons use the rank-general broadcast
+//!   comparison launcher below, matching PyTorch's TensorIterator CUDA
+//!   residency.
 //! - **Logical** (u8 in, u8 out): `and / or / xor` (binary), `not` (unary).
 //!   Inputs are treated as "nonzero == true"; outputs are canonical 0/1.
 //! - **signbit** (value dtype in, u8 0/1 out): reads the raw sign bit for
@@ -42,7 +43,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (comparison ops) | SHIPPED | `pub fn gpu_cmp_f32 / gpu_cmp_f64 / gpu_cmp_i32 / gpu_cmp_i64 / gpu_cmp_bf16 / gpu_cmp_f16 in bool_kernels.rs` thin-wrap `launch_cmp` / `launch_cmp_half` templated per (dtype, op); consumer bool-result arms of `eq/ne/lt/le/gt/ge` op handlers in `backend_impl.rs` |
+//! | REQ-1 (comparison ops) | SHIPPED | `pub fn gpu_cmp_f32 / gpu_cmp_f64 / gpu_cmp_i16 / gpu_cmp_i32 / gpu_cmp_i64 / gpu_cmp_bf16 / gpu_cmp_f16 in bool_kernels.rs` thin-wrap `launch_cmp` / `launch_cmp_half` templated per (dtype, op); consumer bool-result arms of `eq/ne/lt/le/gt/ge` op handlers in `backend_impl.rs` |
 //! | REQ-2 (logical binary) | SHIPPED | `pub fn gpu_and_bool / gpu_or_bool / gpu_xor_bool in bool_kernels.rs` thin-wrap `launch_logic_bin`; consumer `CudaBackendImpl::and_bool / or_bool / xor_bool in backend_impl.rs` |
 //! | REQ-3 (`gpu_not_bool`) | SHIPPED | `pub fn gpu_not_bool in bool_kernels.rs`; consumer `CudaBackendImpl::not_bool in backend_impl.rs` |
 //! | REQ-4 (`gpu_any_bool`/`gpu_all_bool`) | SHIPPED | `pub fn gpu_any_bool / gpu_all_bool in bool_kernels.rs`; consumer `CudaBackendImpl::any_bool / all_bool in backend_impl.rs` |
@@ -52,7 +53,7 @@
 //! | REQ-8 (empty-input short-circuit) | SHIPPED | `launch_cmp` and `launch_not` short-circuit `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with empty-identity clone_htod; consumer backend dispatch path (`torch.any(empty)`) |
 //! | REQ-9 (on-device bool broadcast, #1663) | SHIPPED | `pub fn gpu_broadcast_bool in bool_kernels.rs` (u8 strided gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled); consumer `CudaBackendImpl::broadcast_bool in backend_impl.rs`, itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch (the path `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` flow through). Mirrors `expand_outplace` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |
 //! | REQ-10 (`signbit`) | SHIPPED | `pub fn gpu_signbit_f32 / gpu_signbit_f64 / gpu_signbit_f16 / gpu_signbit_bf16 in bool_kernels.rs`; consumer `CudaBackendImpl::signbit_mask` and `grad_fns::transcendental::signbit` CUDA branch. |
-//! | REQ-11 (integer broadcast comparison) | SHIPPED | `pub fn gpu_cmp_broadcast_i32 / gpu_cmp_broadcast_i64 in bool_kernels.rs` use rank-general shape/stride metadata buffers; consumer `CudaBackendImpl::compare_broadcast`, so `BoolTensor::compare_int` keeps broadcasted integer operands and bool outputs CUDA-resident. |
+//! | REQ-11 (integer broadcast comparison) | SHIPPED | `pub fn gpu_cmp_broadcast_i16 / gpu_cmp_broadcast_i32 / gpu_cmp_broadcast_i64 in bool_kernels.rs` use rank-general shape/stride metadata buffers; consumer `CudaBackendImpl::compare_broadcast`, so `BoolTensor::compare_int` keeps broadcasted integer operands and bool outputs CUDA-resident. |
 
 #![cfg(feature = "cuda")]
 
@@ -235,6 +236,160 @@ END_LOOP:
     add.u64 %off_b, %b, %off_b;
     ld.global.{load_ty} %vb, [%off_b];
 
+    {setp}
+    selp.u16 %res, 1, 0, %c;
+
+    cvt.u64.u32 %off_out, %idx;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u8 [%off_out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for signed i16 comparison.
+///
+/// PTX has no `setp.*.s16` form, so each lane loads the raw 16-bit value,
+/// sign-extends it to s32, then uses the same signed integer predicate form as
+/// the i32 kernel. That mirrors PyTorch's signed `torch.int16` comparison.
+fn cmp_i16_ptx(kernel_name: &str, setp: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 a_ptr, .param .u64 b_ptr, .param .u64 out_ptr, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %b, %out, %ioff, %ooff;
+    .reg .b16 %ha, %hb;
+    .reg .s32 %va, %vb;
+    .reg .u16 %res;
+    .reg .pred %p, %c;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    add.u64 %b, %b, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.b16 %ha, [%a];
+    ld.global.b16 %hb, [%b];
+    cvt.s32.s16 %va, %ha;
+    cvt.s32.s16 %vb, %hb;
+    {setp}
+    selp.u16 %res, 1, 0, %c;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// Rank-general broadcast comparison for signed i16 values. The index math is
+/// identical to [`cmp_broadcast_ptx`], with an i16 load/sign-extend before the
+/// signed s32 predicate.
+fn cmp_broadcast_i16_ptx(kernel_name: &str, setp: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %ndim_r;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %ha, %hb;
+    .reg .s32 %va, %vb;
+    .reg .u16 %res;
+    .reg .pred %p, %loop_p, %c;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %nr, [n];
+    ld.param.u32 %ndim_r, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %idx;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_r;
+
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+
+    bra LOOP;
+END_LOOP:
+
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %a, %off_a;
+    ld.global.b16 %ha, [%off_a];
+
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %b, %off_b;
+    ld.global.b16 %hb, [%off_b];
+
+    cvt.s32.s16 %va, %ha;
+    cvt.s32.s16 %vb, %hb;
     {setp}
     selp.u16 %res, 1, 0, %c;
 
@@ -1200,7 +1355,7 @@ DONE:
 // ===========================================================================
 
 /// Launch a comparison `(a_ptr, b_ptr, out_ptr, n)` kernel over a value buffer
-/// of native element type `T` (`f32`/`f64`/`i32`/`i64`), producing a fresh
+/// of native element type `T` (`f32`/`f64`/`i16`/`i32`/`i64`), producing a fresh
 /// `CudaSlice<u8>` of `n` 0/1 bytes resident on `device`.
 ///
 /// `n` is the LOGICAL element count of the operands (`CudaBuffer::len()`), not
@@ -1753,6 +1908,19 @@ pub fn gpu_cmp_f64(
     launch_cmp::<f64>(a, b, n, d, ptx, name, "cmp_f64")
 }
 
+/// i16 comparison → u8 0/1 buffer (signed compare).
+pub fn gpu_cmp_i16(
+    a: &CudaSlice<i16>,
+    b: &CudaSlice<i16>,
+    n: usize,
+    op: &str,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let name = format!("cmp_{op}_i16_kernel");
+    let ptx = cmp_i16_ptx(&name, &setp_for(op, "s32"));
+    launch_cmp::<i16>(a, b, n, d, ptx, name, "cmp_i16")
+}
+
 /// i32 comparison → u8 0/1 buffer (signed compare).
 pub fn gpu_cmp_i32(
     a: &CudaSlice<i32>,
@@ -1777,6 +1945,36 @@ pub fn gpu_cmp_i64(
     let name = format!("cmp_{op}_i64_kernel");
     let ptx = cmp_ptx(&name, 3, "s64", ".reg .s64 %va, %vb;", &setp_for(op, "s64"));
     launch_cmp::<i64>(a, b, n, d, ptx, name, "cmp_i64")
+}
+
+/// Broadcasted i16 comparison → u8 0/1 buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_cmp_broadcast_i16(
+    a: &CudaSlice<i16>,
+    b: &CudaSlice<i16>,
+    a_numel: usize,
+    b_numel: usize,
+    out_shape: &[usize],
+    a_src_strides: &[usize],
+    b_src_strides: &[usize],
+    op: &str,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let name = format!("cmp_broadcast_{op}_i16_kernel");
+    let ptx = cmp_broadcast_i16_ptx(&name, &setp_for(op, "s32"));
+    launch_cmp_broadcast::<i16>(
+        a,
+        b,
+        a_numel,
+        b_numel,
+        out_shape,
+        a_src_strides,
+        b_src_strides,
+        d,
+        ptx,
+        name,
+        "cmp_broadcast_i16",
+    )
 }
 
 /// Broadcasted i32 comparison → u8 0/1 buffer.
