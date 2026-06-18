@@ -94,6 +94,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- On-device GPU rand: Philox kernel subsequence layout diverges from torch.cuda curand (byte-parity follow-up, #1682) (#1683)
 - CORE-087: The advertised packed INT4 format stores one byte per element (#1781)
 - CORE-081: Sparse SGD replaces tensor identity and leaves aliases stale (#1775)
 - Add CUDA real/Hermitian FFT support for non-last and multi-axis transforms (#2003)

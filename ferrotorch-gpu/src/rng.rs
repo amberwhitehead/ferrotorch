@@ -40,8 +40,8 @@
 //! | REQ-2 (`PhiloxGenerator`) | SHIPPED | `pub struct PhiloxGenerator in rng.rs` with Philox 4x32-10 constants; consumer `CudaRngManager.generators in rng.rs` map stores instances; production callers via `backend_impl.rs` |
 //! | REQ-3 (`CudaRngManager` + global accessor) | SHIPPED | `pub struct CudaRngManager in rng.rs` + `pub fn cuda_rng_manager` singleton; consumer four `crate::rng::cuda_rng_manager().lock()` sites in `backend_impl.rs` |
 //! | REQ-4 (`fork_rng` / `join_rng`) | SHIPPED | `pub fn fork_rng / pub fn join_rng in rng.rs`; consumer re-exported at `lib.rs`; `ferrotorch-core/src/quantize.rs` defines parallel `cuda_rng::fork_rng / join_rng` Python-API surface wrapping these |
-//! | REQ-5 (`gpu_philox_uniform`) | SHIPPED | `pub(crate) const PHILOX_UNIFORM_PTX in rng.rs` + `pub fn gpu_philox_uniform`; consumer dropout-philox path in `CudaBackendImpl::dropout_philox_f32 in backend_impl.rs` derives a seed from the manager and launches the dropout kernel |
-//! | REQ-6 (`gpu_philox_normal`) | SHIPPED | `pub(crate) const PHILOX_NORMAL_PTX in rng.rs` + `pub fn gpu_philox_normal`; consumer re-exported through `lib.rs`, consumed by `ferrotorch-distributions` Normal sampling path on GPU |
+//! | REQ-5 (`gpu_philox_uniform`) | SHIPPED | `build_philox_uniform_f32_ptx` / `build_philox_uniform_f64_ptx` emit resident PyTorch-layout Philox kernels; consumer dropout-philox path in `CudaBackendImpl::dropout_philox_f32 in backend_impl.rs` derives a seed from the manager and launches the dropout kernel |
+//! | REQ-6 (`gpu_philox_normal`) | SHIPPED | `build_philox_normal_f32_ptx` / `build_philox_normal_f64_ptx` emit resident PyTorch-layout Philox kernels; consumer re-exported through `lib.rs`, consumed by `ferrotorch-distributions` Normal sampling path on GPU |
 //! | REQ-7 (Manager↔backend wiring) | SHIPPED | `use crate::rng` import sites in `backend_impl.rs` inside dropout-philox / stochastic-rounding `CudaBackendImpl` methods; ferrotorch-core dispatches `Tensor::dropout` through `GpuBackend::dropout_philox_f32` |
 
 use std::collections::HashMap;
@@ -559,664 +559,17 @@ pub fn join_rng(devices: &[usize], states: Vec<PhiloxState>) -> GpuResult<()> {
 // PTX kernels for Philox RNG on GPU
 // ---------------------------------------------------------------------------
 
-/// PTX source for `philox_uniform_kernel`: fills buffer with uniform f32 in [0, 1).
-///
-/// Parameters:
-///   out_ptr    — pointer to output f32 buffer
-///   n          — number of elements
-///   seed_lo    — lower 32 bits of the seed
-///   seed_hi    — upper 32 bits of the seed
-///   counter_lo — lower 32 bits of the starting counter
-///   counter_hi — upper 32 bits of the starting counter
-///
-/// Each thread generates one f32 value. The counter for each thread is
-/// `base_counter + thread_idx / 4`, and the sub-index within the 4-tuple
-/// is `thread_idx % 4`.
-#[cfg(feature = "cuda")]
-pub(crate) const PHILOX_UNIFORM_PTX: &str = "\
-.version 7.0
-.target sm_52
-.address_size 64
-
-.visible .entry philox_uniform_kernel(
-    .param .u64 out_ptr,
-    .param .u32 n,
-    .param .u32 seed_lo,
-    .param .u32 seed_hi,
-    .param .u32 counter_lo,
-    .param .u32 counter_hi
-) {
-    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
-    .reg .u32 %slo, %shi, %clo, %chi;
-    .reg .u32 %group, %sub, %rem;
-    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
-    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
-    .reg .u64 %prod, %out, %off;
-    .reg .u32 %result, %shifted;
-    .reg .f32 %fval, %scale;
-    .reg .pred %p, %p_sub;
-
-    ld.param.u64 %out, [out_ptr];
-    ld.param.u32 %n_reg, [n];
-    ld.param.u32 %slo, [seed_lo];
-    ld.param.u32 %shi, [seed_hi];
-    ld.param.u32 %clo, [counter_lo];
-    ld.param.u32 %chi, [counter_hi];
-
-    // Global thread index
-    mov.u32 %bid, %ctaid.x;
-    mov.u32 %bdim, %ntid.x;
-    mov.u32 %ltid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %ltid;
-
-    setp.ge.u32 %p, %gid, %n_reg;
-    @%p bra DONE;
-
-    // group = gid / 4, sub = gid % 4
-    shr.u32 %group, %gid, 2;
-    and.b32 %sub, %gid, 3;
-
-    // counter = base_counter + group (64-bit add via carry)
-    add.cc.u32 %c0, %clo, %group;
-    addc.u32 %c1, %chi, 0;
-    mov.u32 %c2, 0;
-    mov.u32 %c3, 0;
-    mov.u32 %k0, %slo;
-    mov.u32 %k1, %shi;
-
-    // === 10 rounds of Philox mixing ===
-    // Round 1
-    // prod0 = M0 * c0 -> hi0, lo0
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    // prod1 = M1 * c2 -> hi1, lo1
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    // new values
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    // key advance
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 2
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 3
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 4
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 5
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 6
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 7
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 8
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 9
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 10 (final)
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-
-    // Select output based on sub-index (gid % 4)
-    // sub == 0 -> c0, sub == 1 -> c1, sub == 2 -> c2, sub == 3 -> c3
-    mov.u32 %result, %c0;
-    setp.eq.u32 %p_sub, %sub, 1;
-    @%p_sub mov.u32 %result, %c1;
-    setp.eq.u32 %p_sub, %sub, 2;
-    @%p_sub mov.u32 %result, %c2;
-    setp.eq.u32 %p_sub, %sub, 3;
-    @%p_sub mov.u32 %result, %c3;
-
-    // Convert to f32 in [0, 1): (result >> 8) * 2^-24
-    shr.u32 %shifted, %result, 8;
-    cvt.rn.f32.u32 %fval, %shifted;
-    mov.f32 %scale, 0f33800000;
-    mul.f32 %fval, %fval, %scale;
-
-    // Store
-    cvt.u64.u32 %off, %gid;
-    shl.b64 %off, %off, 2;
-    add.u64 %out, %out, %off;
-    st.global.f32 [%out], %fval;
-
-DONE:
-    ret;
-}
-";
-
-/// PTX source for `philox_normal_kernel`: fills buffer with standard normal f32
-/// values using Box-Muller transform on Philox-generated uniforms.
-///
-/// Each thread generates 2 normal values (or 1 if at the end). Threads are
-/// dispatched for n/2 pairs. Thread `i` produces output[2*i] and output[2*i+1].
-///
-/// Parameters:
-///   out_ptr    — pointer to output f32 buffer
-///   n          — number of elements
-///   seed_lo    — lower 32 bits of the seed
-///   seed_hi    — upper 32 bits of the seed
-///   counter_lo — lower 32 bits of the starting counter
-///   counter_hi — upper 32 bits of the starting counter
-#[cfg(feature = "cuda")]
-pub(crate) const PHILOX_NORMAL_PTX: &str = "\
-.version 7.0
-.target sm_52
-.address_size 64
-
-.visible .entry philox_normal_kernel(
-    .param .u64 out_ptr,
-    .param .u32 n,
-    .param .u32 seed_lo,
-    .param .u32 seed_hi,
-    .param .u32 counter_lo,
-    .param .u32 counter_hi
-) {
-    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
-    .reg .u32 %slo, %shi, %clo, %chi;
-    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
-    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
-    .reg .u64 %prod, %out, %off;
-    .reg .u32 %idx0, %idx1, %shifted0, %shifted1;
-    .reg .f32 %u1, %u2, %r, %theta, %z0, %z1;
-    .reg .f32 %scale, %two_pi, %neg2, %ln_u1;
-    .reg .pred %p, %p2;
-
-    ld.param.u64 %out, [out_ptr];
-    ld.param.u32 %n_reg, [n];
-    ld.param.u32 %slo, [seed_lo];
-    ld.param.u32 %shi, [seed_hi];
-    ld.param.u32 %clo, [counter_lo];
-    ld.param.u32 %chi, [counter_hi];
-
-    // Global thread index (each thread handles 2 output elements)
-    mov.u32 %bid, %ctaid.x;
-    mov.u32 %bdim, %ntid.x;
-    mov.u32 %ltid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %ltid;
-
-    // Each thread produces elements at idx0 = 2*gid and idx1 = 2*gid+1
-    shl.b32 %idx0, %gid, 1;
-    setp.ge.u32 %p, %idx0, %n_reg;
-    @%p bra DONE;
-    add.u32 %idx1, %idx0, 1;
-
-    // Counter for this thread = base_counter + gid
-    // We use c0, c1 from the Philox state; each thread gets a unique counter
-    add.cc.u32 %c0, %clo, %gid;
-    addc.u32 %c1, %chi, 0;
-    mov.u32 %c2, 0;
-    mov.u32 %c3, 0;
-    mov.u32 %k0, %slo;
-    mov.u32 %k1, %shi;
-
-    // === 10 rounds of Philox mixing (same as uniform kernel) ===
-    // Round 1
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 2
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 3
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 4
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 5
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 6
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 7
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 8
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 9
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-    add.u32 %k0, %k0, 0x9E3779B9;
-    add.u32 %k1, %k1, 0xBB67AE85;
-
-    // Round 10 (final)
-    mul.wide.u32 %prod, %c0, 0xD2511F53;
-    cvt.u32.u64 %lo_val, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %hi_val, %prod;
-    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
-    cvt.u32.u64 %t2, %prod;
-    shr.u64 %prod, %prod, 32;
-    cvt.u32.u64 %t3, %prod;
-    xor.b32 %t0, %t3, %c1;
-    xor.b32 %t0, %t0, %k0;
-    mov.u32 %t1, %t2;
-    xor.b32 %t2, %hi_val, %c3;
-    xor.b32 %t2, %t2, %k1;
-    mov.u32 %t3, %lo_val;
-    mov.u32 %c0, %t0;
-    mov.u32 %c1, %t1;
-    mov.u32 %c2, %t2;
-    mov.u32 %c3, %t3;
-
-    // Use c0/c1 as the two uniform u32 values for Box-Muller
-    // u1 = (c0 >> 8) * 2^-24, ensure u1 > 0 by OR-ing in 1 if zero
-    // u2 = (c1 >> 8) * 2^-24
-    shr.u32 %shifted0, %c0, 8;
-    // Ensure shifted0 > 0 to avoid log(0)
-    setp.eq.u32 %p2, %shifted0, 0;
-    @%p2 mov.u32 %shifted0, 1;
-    cvt.rn.f32.u32 %u1, %shifted0;
-    mov.f32 %scale, 0f33800000;
-    mul.f32 %u1, %u1, %scale;
-
-    shr.u32 %shifted1, %c1, 8;
-    cvt.rn.f32.u32 %u2, %shifted1;
-    mul.f32 %u2, %u2, %scale;
-
-    // Box-Muller: z0 = sqrt(-2*ln(u1)) * cos(2*pi*u2)
-    //             z1 = sqrt(-2*ln(u1)) * sin(2*pi*u2)
-    // ln(u1)
-    lg2.approx.f32 %ln_u1, %u1;
-    // Convert log2 to ln: ln(x) = log2(x) * ln(2) = log2(x) * 0.693147
-    mul.f32 %ln_u1, %ln_u1, 0f3F317218;
-    // -2 * ln(u1)
-    mov.f32 %neg2, 0fC0000000;
-    mul.f32 %r, %neg2, %ln_u1;
-    // sqrt
-    sqrt.approx.f32 %r, %r;
-    // 2*pi*u2
-    mov.f32 %two_pi, 0f40C90FDB;
-    mul.f32 %theta, %two_pi, %u2;
-    // cos and sin
-    cos.approx.f32 %z0, %theta;
-    mul.f32 %z0, %r, %z0;
-    sin.approx.f32 %z1, %theta;
-    mul.f32 %z1, %r, %z1;
-
-    // Store z0 at output[idx0]
-    cvt.u64.u32 %off, %idx0;
-    shl.b64 %off, %off, 2;
-    add.u64 %off, %out, %off;
-    st.global.f32 [%off], %z0;
-
-    // Store z1 at output[idx1] (if idx1 < n)
-    setp.ge.u32 %p2, %idx1, %n_reg;
-    @%p2 bra DONE;
-    cvt.u64.u32 %off, %idx1;
-    shl.b64 %off, %off, 2;
-    add.u64 %off, %out, %off;
-    st.global.f32 [%off], %z1;
-
-DONE:
-    ret;
-}
-";
-
 #[cfg(feature = "cuda")]
 static PHILOX_UNIFORM_F64_PTX: LazyLock<String> = LazyLock::new(build_philox_uniform_f64_ptx);
 
 #[cfg(feature = "cuda")]
 static PHILOX_NORMAL_F64_PTX: LazyLock<String> = LazyLock::new(build_philox_normal_f64_ptx);
+
+#[cfg(feature = "cuda")]
+static PHILOX_UNIFORM_F32_PTX: LazyLock<String> = LazyLock::new(build_philox_uniform_f32_ptx);
+
+#[cfg(feature = "cuda")]
+static PHILOX_NORMAL_F32_PTX: LazyLock<String> = LazyLock::new(build_philox_normal_f32_ptx);
 
 #[cfg(feature = "cuda")]
 fn push_philox_rounds_ptx(ptx: &mut String) {
@@ -1255,49 +608,289 @@ fn push_philox_rounds_ptx(ptx: &mut String) {
 }
 
 #[cfg(feature = "cuda")]
-fn push_f64_from_two_u32_ptx(
-    ptx: &mut String,
-    hi: &str,
-    lo: &str,
-    out: &str,
-    ensure_nonzero: bool,
-) {
-    ptx.push_str("    cvt.u64.u32 %hi64, ");
-    ptx.push_str(hi);
-    ptx.push_str(";\n");
-    ptx.push_str("    shl.b64 %hi64, %hi64, 32;\n");
-    ptx.push_str("    cvt.u64.u32 %lo64, ");
-    ptx.push_str(lo);
-    ptx.push_str(";\n");
-    ptx.push_str("    or.b64 %bits, %hi64, %lo64;\n");
-    ptx.push_str("    shr.u64 %mant, %bits, 11;\n");
-    if ensure_nonzero {
-        ptx.push_str("    setp.eq.u64 %p_zero, %mant, 0;\n");
-        ptx.push_str("    @%p_zero mov.u64 %mant, 1;\n");
-    }
-    ptx.push_str("    cvt.rn.f64.u64 ");
+fn push_curand_uniform_f32_ptx(ptx: &mut String, word: &str, out: &str) {
+    ptx.push_str("    cvt.rn.f32.u32 ");
     ptx.push_str(out);
-    ptx.push_str(", %mant;\n");
-    ptx.push_str("    mov.f64 %scale, 0d3CA0000000000000;\n");
-    ptx.push_str("    mul.rn.f64 ");
+    ptx.push_str(", ");
+    ptx.push_str(word);
+    ptx.push_str(";\n");
+    ptx.push_str("    fma.rn.f32 ");
     ptx.push_str(out);
     ptx.push_str(", ");
     ptx.push_str(out);
-    ptx.push_str(", %scale;\n");
+    ptx.push_str(", 0f2F800000, 0f2F000000;\n");
 }
 
 #[cfg(feature = "cuda")]
-fn push_box_muller_f64_uniform_ptx(ptx: &mut String, hi: &str, lo: &str, out: &str) {
-    ptx.push_str("    cvt.rn.f64.u32 %u_tmp0, ");
-    ptx.push_str(lo);
+fn push_store_f32_lane_ptx(ptx: &mut String, lane: usize, word: &str) {
+    let label = format!("SKIP_UNIFORM_F32_LANE_{lane}");
+    if lane == 0 {
+        ptx.push_str("    mov.u64 %store_idx, %linear;\n");
+    } else {
+        ptx.push_str("    add.u64 %store_idx, %linear, %stride_reg;\n");
+        for _ in 1..lane {
+            ptx.push_str("    add.u64 %store_idx, %store_idx, %stride_reg;\n");
+        }
+    }
+    ptx.push_str("    setp.ge.u64 %p_store, %store_idx, %n_reg;\n");
+    ptx.push_str("    @%p_store bra ");
+    ptx.push_str(&label);
     ptx.push_str(";\n");
-    ptx.push_str("    fma.rn.f64 %u_tmp1, %u_tmp0, 0d3BF0000000000000, 0d3BE0000000000000;\n");
-    ptx.push_str("    cvt.rn.f64.u32 %u_tmp0, ");
-    ptx.push_str(hi);
+    push_curand_uniform_f32_ptx(ptx, word, "%fval");
+    ptx.push_str("    setp.eq.f32 %p_one, %fval, 0f3F800000;\n");
+    ptx.push_str("    @%p_one mov.f32 %fval, 0f00000000;\n");
+    ptx.push_str("    shl.b64 %off, %store_idx, 2;\n");
+    ptx.push_str("    add.u64 %off, %out, %off;\n");
+    ptx.push_str("    st.global.f32 [%off], %fval;\n");
+    ptx.push_str(&label);
+    ptx.push_str(":\n");
+}
+
+#[cfg(feature = "cuda")]
+fn build_philox_uniform_f32_ptx() -> String {
+    let mut ptx = String::from(
+        r".version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry philox_uniform_kernel(
+    .param .u64 out_ptr,
+    .param .u64 n,
+    .param .u32 seed_lo,
+    .param .u32 seed_hi,
+    .param .u32 counter_lo,
+    .param .u32 counter_hi,
+    .param .u64 stride
+) {
+    .reg .u32 %ltid, %bid, %bdim, %gid;
+    .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %ctr_add_lo, %ctr_add_hi;
+    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
+    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
+    .reg .u64 %prod, %out, %off;
+    .reg .f32 %fval;
+    .reg .pred %p_done, %p_store, %p_one;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %n_reg, [n];
+    ld.param.u32 %slo, [seed_lo];
+    ld.param.u32 %shi, [seed_hi];
+    ld.param.u32 %clo, [counter_lo];
+    ld.param.u32 %chi, [counter_hi];
+    ld.param.u64 %stride_reg, [stride];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
+    cvt.u64.u32 %gid64, %gid;
+    mov.u64 %linear, %gid64;
+    mov.u64 %ctr_add, 0;
+    mul.lo.u64 %step, %stride_reg, 4;
+
+LOOP_UNIFORM_F32:
+    setp.ge.u64 %p_done, %linear, %n_reg;
+    @%p_done bra DONE;
+
+    cvt.u32.u64 %ctr_add_lo, %ctr_add;
+    shr.u64 %tmp64, %ctr_add, 32;
+    cvt.u32.u64 %ctr_add_hi, %tmp64;
+    add.cc.u32 %c0, %clo, %ctr_add_lo;
+    addc.u32 %c1, %chi, %ctr_add_hi;
+    cvt.u32.u64 %c2, %gid64;
+    shr.u64 %tmp64, %gid64, 32;
+    cvt.u32.u64 %c3, %tmp64;
+    mov.u32 %k0, %slo;
+    mov.u32 %k1, %shi;
+",
+    );
+    push_philox_rounds_ptx(&mut ptx);
+    push_store_f32_lane_ptx(&mut ptx, 0, "%c0");
+    push_store_f32_lane_ptx(&mut ptx, 1, "%c1");
+    push_store_f32_lane_ptx(&mut ptx, 2, "%c2");
+    push_store_f32_lane_ptx(&mut ptx, 3, "%c3");
+    ptx.push_str(
+        r"
+    add.u64 %linear, %linear, %step;
+    add.u64 %ctr_add, %ctr_add, 1;
+    bra LOOP_UNIFORM_F32;
+
+DONE:
+    ret;
+}
+",
+    );
+    ptx
+}
+
+#[cfg(feature = "cuda")]
+fn push_store_normal_f32_pair_ptx(
+    ptx: &mut String,
+    pair: usize,
+    x_word: &str,
+    y_word: &str,
+    base_lane: usize,
+) {
+    let skip_sin = format!("SKIP_NORMAL_F32_PAIR_{pair}_SIN");
+    let skip_cos = format!("SKIP_NORMAL_F32_PAIR_{pair}_COS");
+    push_curand_uniform_f32_ptx(ptx, x_word, "%u1");
+    ptx.push_str("    cvt.rn.f32.u32 %u2, ");
+    ptx.push_str(y_word);
     ptx.push_str(";\n");
+    ptx.push_str("    fma.rn.f32 %theta, %u2, 0f30C90FDB, 0f30490FDB;\n");
+    ptx.push_str("    lg2.approx.f32 %ln_u1, %u1;\n");
+    ptx.push_str("    mul.f32 %ln_u1, %ln_u1, 0f3F317218;\n");
+    ptx.push_str("    mul.f32 %radius, %ln_u1, 0fC0000000;\n");
+    ptx.push_str("    sqrt.rn.f32 %radius, %radius;\n");
+    ptx.push_str("    sin.approx.f32 %sin_val, %theta;\n");
+    ptx.push_str("    cos.approx.f32 %cos_val, %theta;\n");
+    ptx.push_str("    mul.f32 %sin_val, %radius, %sin_val;\n");
+    ptx.push_str("    mul.f32 %cos_val, %radius, %cos_val;\n");
+
+    if base_lane == 0 {
+        ptx.push_str("    mov.u64 %store_idx, %linear;\n");
+    } else {
+        ptx.push_str("    add.u64 %store_idx, %linear, %stride_reg;\n");
+        for _ in 1..base_lane {
+            ptx.push_str("    add.u64 %store_idx, %store_idx, %stride_reg;\n");
+        }
+    }
+    ptx.push_str("    setp.ge.u64 %p_store, %store_idx, %n_reg;\n");
+    ptx.push_str("    @%p_store bra ");
+    ptx.push_str(&skip_sin);
+    ptx.push_str(";\n");
+    ptx.push_str("    shl.b64 %off, %store_idx, 2;\n");
+    ptx.push_str("    add.u64 %off, %out, %off;\n");
+    ptx.push_str("    st.global.f32 [%off], %sin_val;\n");
+    ptx.push_str(&skip_sin);
+    ptx.push_str(":\n");
+
+    ptx.push_str("    add.u64 %store_idx, %store_idx, %stride_reg;\n");
+    ptx.push_str("    setp.ge.u64 %p_store, %store_idx, %n_reg;\n");
+    ptx.push_str("    @%p_store bra ");
+    ptx.push_str(&skip_cos);
+    ptx.push_str(";\n");
+    ptx.push_str("    shl.b64 %off, %store_idx, 2;\n");
+    ptx.push_str("    add.u64 %off, %out, %off;\n");
+    ptx.push_str("    st.global.f32 [%off], %cos_val;\n");
+    ptx.push_str(&skip_cos);
+    ptx.push_str(":\n");
+}
+
+#[cfg(feature = "cuda")]
+fn build_philox_normal_f32_ptx() -> String {
+    let mut ptx = String::from(
+        r".version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry philox_normal_kernel(
+    .param .u64 out_ptr,
+    .param .u64 n,
+    .param .u32 seed_lo,
+    .param .u32 seed_hi,
+    .param .u32 counter_lo,
+    .param .u32 counter_hi,
+    .param .u64 stride
+) {
+    .reg .u32 %ltid, %bid, %bdim, %gid;
+    .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %ctr_add_lo, %ctr_add_hi;
+    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
+    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
+    .reg .u64 %prod, %out, %off;
+    .reg .f32 %u1, %u2, %theta, %ln_u1, %radius, %sin_val, %cos_val;
+    .reg .pred %p_done, %p_store;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %n_reg, [n];
+    ld.param.u32 %slo, [seed_lo];
+    ld.param.u32 %shi, [seed_hi];
+    ld.param.u32 %clo, [counter_lo];
+    ld.param.u32 %chi, [counter_hi];
+    ld.param.u64 %stride_reg, [stride];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
+    cvt.u64.u32 %gid64, %gid;
+    mov.u64 %linear, %gid64;
+    mov.u64 %ctr_add, 0;
+    mul.lo.u64 %step, %stride_reg, 4;
+
+LOOP_NORMAL_F32:
+    setp.ge.u64 %p_done, %linear, %n_reg;
+    @%p_done bra DONE;
+
+    cvt.u32.u64 %ctr_add_lo, %ctr_add;
+    shr.u64 %tmp64, %ctr_add, 32;
+    cvt.u32.u64 %ctr_add_hi, %tmp64;
+    add.cc.u32 %c0, %clo, %ctr_add_lo;
+    addc.u32 %c1, %chi, %ctr_add_hi;
+    cvt.u32.u64 %c2, %gid64;
+    shr.u64 %tmp64, %gid64, 32;
+    cvt.u32.u64 %c3, %tmp64;
+    mov.u32 %k0, %slo;
+    mov.u32 %k1, %shi;
+",
+    );
+    push_philox_rounds_ptx(&mut ptx);
+    push_store_normal_f32_pair_ptx(&mut ptx, 0, "%c0", "%c1", 0);
+    push_store_normal_f32_pair_ptx(&mut ptx, 1, "%c2", "%c3", 2);
+    ptx.push_str(
+        r"
+    add.u64 %linear, %linear, %step;
+    add.u64 %ctr_add, %ctr_add, 1;
+    bra LOOP_NORMAL_F32;
+
+DONE:
+    ret;
+}
+",
+    );
+    ptx
+}
+
+#[cfg(feature = "cuda")]
+fn push_f64_from_two_u32_ptx(
+    ptx: &mut String,
+    x: &str,
+    y: &str,
+    out: &str,
+    reverse_one_to_zero: bool,
+) {
+    ptx.push_str("    cvt.u64.u32 %lo64, ");
+    ptx.push_str(x);
+    ptx.push_str(";\n");
+    ptx.push_str("    cvt.u64.u32 %hi64, ");
+    ptx.push_str(y);
+    ptx.push_str(";\n");
+    ptx.push_str("    shl.b64 %hi64, %hi64, 21;\n");
+    ptx.push_str("    xor.b64 %mant, %lo64, %hi64;\n");
+    ptx.push_str("    cvt.rn.f64.u64 ");
+    ptx.push_str(out);
+    ptx.push_str(", %mant;\n");
     ptx.push_str("    fma.rn.f64 ");
     ptx.push_str(out);
-    ptx.push_str(", %u_tmp0, 0d3DF0000000000000, %u_tmp1;\n");
+    ptx.push_str(", ");
+    ptx.push_str(out);
+    ptx.push_str(", 0d3CA0000000000000, 0d3C90000000000000;\n");
+    if reverse_one_to_zero {
+        ptx.push_str("    setp.eq.f64 %p_one, ");
+        ptx.push_str(out);
+        ptx.push_str(", 0d3FF0000000000000;\n");
+        ptx.push_str("    @%p_one mov.f64 ");
+        ptx.push_str(out);
+        ptx.push_str(", 0d0000000000000000;\n");
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn push_box_muller_f64_uniform_ptx(ptx: &mut String, x: &str, y: &str, out: &str) {
+    push_f64_from_two_u32_ptx(ptx, x, y, out, false);
 }
 
 #[cfg(feature = "cuda")]
@@ -1309,64 +902,82 @@ fn build_philox_uniform_f64_ptx() -> String {
 
 .visible .entry philox_uniform_f64_kernel(
     .param .u64 out_ptr,
-    .param .u32 n,
+    .param .u64 n,
     .param .u32 seed_lo,
     .param .u32 seed_hi,
     .param .u32 counter_lo,
-    .param .u32 counter_hi
+    .param .u32 counter_hi,
+    .param .u64 stride
 ) {
-    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %ltid, %bid, %bdim, %gid;
     .reg .u32 %slo, %shi, %clo, %chi;
-    .reg .u32 %group, %sub, %hi_word, %lo_word;
+    .reg .u32 %ctr_add_lo, %ctr_add_hi;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
     .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
-    .reg .u64 %prod, %out, %off, %hi64, %lo64, %bits, %mant;
-    .reg .f64 %fval, %scale;
-    .reg .pred %p, %p_sub, %p_zero;
+    .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
+    .reg .u64 %prod, %out, %off, %hi64, %lo64, %mant;
+    .reg .f64 %fval;
+    .reg .pred %p_done, %p_store, %p_one;
 
     ld.param.u64 %out, [out_ptr];
-    ld.param.u32 %n_reg, [n];
+    ld.param.u64 %n_reg, [n];
     ld.param.u32 %slo, [seed_lo];
     ld.param.u32 %shi, [seed_hi];
     ld.param.u32 %clo, [counter_lo];
     ld.param.u32 %chi, [counter_hi];
+    ld.param.u64 %stride_reg, [stride];
 
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
     mov.u32 %ltid, %tid.x;
     mad.lo.u32 %gid, %bid, %bdim, %ltid;
+    cvt.u64.u32 %gid64, %gid;
+    mov.u64 %linear, %gid64;
+    mov.u64 %ctr_add, 0;
+    mul.lo.u64 %step, %stride_reg, 2;
 
-    setp.ge.u32 %p, %gid, %n_reg;
-    @%p bra DONE;
+LOOP_UNIFORM_F64:
+    setp.ge.u64 %p_done, %linear, %n_reg;
+    @%p_done bra DONE;
 
-    shr.u32 %group, %gid, 1;
-    and.b32 %sub, %gid, 1;
-
-    add.cc.u32 %c0, %clo, %group;
-    addc.u32 %c1, %chi, 0;
-    mov.u32 %c2, 0;
-    mov.u32 %c3, 0;
+    cvt.u32.u64 %ctr_add_lo, %ctr_add;
+    shr.u64 %tmp64, %ctr_add, 32;
+    cvt.u32.u64 %ctr_add_hi, %tmp64;
+    add.cc.u32 %c0, %clo, %ctr_add_lo;
+    addc.u32 %c1, %chi, %ctr_add_hi;
+    cvt.u32.u64 %c2, %gid64;
+    shr.u64 %tmp64, %gid64, 32;
+    cvt.u32.u64 %c3, %tmp64;
     mov.u32 %k0, %slo;
     mov.u32 %k1, %shi;
 ",
     );
     push_philox_rounds_ptx(&mut ptx);
+    ptx.push_str("    mov.u64 %store_idx, %linear;\n");
+    ptx.push_str("    setp.ge.u64 %p_store, %store_idx, %n_reg;\n");
+    ptx.push_str("    @%p_store bra SKIP_UNIFORM_F64_LANE_0;\n");
+    push_f64_from_two_u32_ptx(&mut ptx, "%c0", "%c1", "%fval", true);
     ptx.push_str(
         r"
-    mov.u32 %hi_word, %c0;
-    mov.u32 %lo_word, %c1;
-    setp.eq.u32 %p_sub, %sub, 1;
-    @%p_sub mov.u32 %hi_word, %c2;
-    @%p_sub mov.u32 %lo_word, %c3;
+    shl.b64 %off, %store_idx, 3;
+    add.u64 %off, %out, %off;
+    st.global.f64 [%off], %fval;
+SKIP_UNIFORM_F64_LANE_0:
+    add.u64 %store_idx, %linear, %stride_reg;
+    setp.ge.u64 %p_store, %store_idx, %n_reg;
+    @%p_store bra SKIP_UNIFORM_F64_LANE_1;
 ",
     );
-    push_f64_from_two_u32_ptx(&mut ptx, "%hi_word", "%lo_word", "%fval", false);
+    push_f64_from_two_u32_ptx(&mut ptx, "%c2", "%c3", "%fval", true);
     ptx.push_str(
         r"
-    cvt.u64.u32 %off, %gid;
-    shl.b64 %off, %off, 3;
-    add.u64 %out, %out, %off;
-    st.global.f64 [%out], %fval;
+    shl.b64 %off, %store_idx, 3;
+    add.u64 %off, %out, %off;
+    st.global.f64 [%off], %fval;
+SKIP_UNIFORM_F64_LANE_1:
+    add.u64 %linear, %linear, %step;
+    add.u64 %ctr_add, %ctr_add, 1;
+    bra LOOP_UNIFORM_F64;
 
 DONE:
     ret;
@@ -1385,18 +996,21 @@ fn build_philox_normal_f64_ptx() -> String {
 
 .visible .entry philox_normal_f64_kernel(
     .param .u64 out_ptr,
-    .param .u32 n,
+    .param .u64 n,
     .param .u32 seed_lo,
     .param .u32 seed_hi,
     .param .u32 counter_lo,
-    .param .u32 counter_hi
+    .param .u32 counter_hi,
+    .param .u64 stride
 ) {
-    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %ltid, %bid, %bdim, %gid;
     .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %ctr_add_lo, %ctr_add_hi;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
     .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
-    .reg .u32 %idx0, %idx1;
+    .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
     .reg .u64 %prod, %out, %off, %xbits, %mantissa_bits, %bias_bits, %q;
+    .reg .u64 %hi64, %lo64, %mant;
     .reg .s64 %exp64, %n_i;
     .reg .b64 %n_bits;
     .reg .f64 %u1, %u2, %u_tmp0, %u_tmp1, %ln_u1, %radius, %theta, %z0, %z1;
@@ -1404,29 +1018,37 @@ fn build_philox_normal_f64_ptx() -> String {
     .reg .f64 %one, %two, %sqrt2, %half_const, %nf;
     .reg .f64 %theta_y, %theta_nf, %theta_r, %theta_r2, %sin_poly, %cos_poly;
     .reg .f64 %sin_r, %cos_r, %neg_sin, %neg_cos, %sin_theta, %cos_theta;
-    .reg .pred %p, %p2, %p_shift, %p_q;
+    .reg .pred %p_done, %p_store, %p_shift, %p_q;
 
     ld.param.u64 %out, [out_ptr];
-    ld.param.u32 %n_reg, [n];
+    ld.param.u64 %n_reg, [n];
     ld.param.u32 %slo, [seed_lo];
     ld.param.u32 %shi, [seed_hi];
     ld.param.u32 %clo, [counter_lo];
     ld.param.u32 %chi, [counter_hi];
+    ld.param.u64 %stride_reg, [stride];
 
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
     mov.u32 %ltid, %tid.x;
     mad.lo.u32 %gid, %bid, %bdim, %ltid;
+    cvt.u64.u32 %gid64, %gid;
+    mov.u64 %linear, %gid64;
+    mov.u64 %ctr_add, 0;
+    mul.lo.u64 %step, %stride_reg, 2;
 
-    shl.b32 %idx0, %gid, 1;
-    setp.ge.u32 %p, %idx0, %n_reg;
-    @%p bra DONE;
-    add.u32 %idx1, %idx0, 1;
+LOOP_NORMAL_F64:
+    setp.ge.u64 %p_done, %linear, %n_reg;
+    @%p_done bra DONE;
 
-    add.cc.u32 %c0, %clo, %gid;
-    addc.u32 %c1, %chi, 0;
-    mov.u32 %c2, 0;
-    mov.u32 %c3, 0;
+    cvt.u32.u64 %ctr_add_lo, %ctr_add;
+    shr.u64 %tmp64, %ctr_add, 32;
+    cvt.u32.u64 %ctr_add_hi, %tmp64;
+    add.cc.u32 %c0, %clo, %ctr_add_lo;
+    addc.u32 %c1, %chi, %ctr_add_hi;
+    cvt.u32.u64 %c2, %gid64;
+    shr.u64 %tmp64, %gid64, 32;
+    cvt.u32.u64 %c3, %tmp64;
     mov.u32 %k0, %slo;
     mov.u32 %k1, %shi;
 ",
@@ -1522,20 +1144,28 @@ fn build_philox_normal_f64_ptx() -> String {
     @%p_q mov.f64 %sin_theta, %neg_cos;
     @%p_q mov.f64 %cos_theta, %sin_r;
 
-    mul.rn.f64 %z0, %radius, %cos_theta;
-    mul.rn.f64 %z1, %radius, %sin_theta;
+    mul.rn.f64 %z0, %radius, %sin_theta;
+    mul.rn.f64 %z1, %radius, %cos_theta;
 
-    cvt.u64.u32 %off, %idx0;
-    shl.b64 %off, %off, 3;
+    mov.u64 %store_idx, %linear;
+    setp.ge.u64 %p_store, %store_idx, %n_reg;
+    @%p_store bra SKIP_NORMAL_F64_LANE_0;
+    shl.b64 %off, %store_idx, 3;
     add.u64 %off, %out, %off;
     st.global.f64 [%off], %z0;
 
-    setp.ge.u32 %p2, %idx1, %n_reg;
-    @%p2 bra DONE;
-    cvt.u64.u32 %off, %idx1;
-    shl.b64 %off, %off, 3;
+SKIP_NORMAL_F64_LANE_0:
+    add.u64 %store_idx, %linear, %stride_reg;
+    setp.ge.u64 %p_store, %store_idx, %n_reg;
+    @%p_store bra SKIP_NORMAL_F64_LANE_1;
+    shl.b64 %off, %store_idx, 3;
     add.u64 %off, %out, %off;
     st.global.f64 [%off], %z1;
+
+SKIP_NORMAL_F64_LANE_1:
+    add.u64 %linear, %linear, %step;
+    add.u64 %ctr_add, %ctr_add, 1;
+    bra LOOP_NORMAL_F64;
 
 DONE:
     ret;
@@ -1667,6 +1297,73 @@ fn rng_launch_cfg(n: usize) -> GpuResult<LaunchConfig> {
 }
 
 #[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct TorchDistributionPolicy {
+    launch: LaunchConfig,
+    stride: u64,
+    /// Number of Philox 4x32 counter groups reserved per logical CUDA thread.
+    ///
+    /// PyTorch's `calc_execution_policy` returns `calls_per_thread * 4` because
+    /// `curand_init(..., offset, ...)` measures offset in 32-bit curand
+    /// elements. `PhiloxGenerator::advance` stores the same position in
+    /// 4x32 counter groups, so the internal increment is `calls_per_thread`.
+    counter_advance: u64,
+}
+
+#[cfg(feature = "cuda")]
+fn torch_distribution_policy(
+    n: usize,
+    unroll_factor: u64,
+    device: &GpuDevice,
+) -> GpuResult<TorchDistributionPolicy> {
+    if n == 0 {
+        return Ok(TorchDistributionPolicy {
+            launch: LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            stride: 256,
+            counter_advance: 0,
+        });
+    }
+    if n > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "rng_kernel_launch",
+            expected: vec![u32::MAX as usize],
+            got: vec![n],
+        });
+    }
+
+    const BLOCK: u32 = 256;
+    let numel = n as u64;
+    let mut grid = numel.div_ceil(BLOCK as u64);
+
+    let max_threads_per_sm = device.context().attribute(
+        cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+    )? as u64;
+    let sm_count = device.context().attribute(
+        cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+    )? as u64;
+    let blocks_per_sm = (max_threads_per_sm / BLOCK as u64).max(1);
+    let grid_cap = (sm_count * blocks_per_sm).max(1);
+    grid = grid.min(grid_cap).max(1);
+
+    let stride = grid * BLOCK as u64;
+    let calls_per_thread = ((numel - 1) / (stride * unroll_factor)) + 1;
+
+    Ok(TorchDistributionPolicy {
+        launch: LaunchConfig {
+            grid_dim: (grid as u32, 1, 1),
+            block_dim: (BLOCK, 1, 1),
+            shared_mem_bytes: 0,
+        },
+        stride,
+        counter_advance: calls_per_thread,
+    })
+}
+
+#[cfg(feature = "cuda")]
 fn cast_uniform_rng_f32_to_u16(
     input: &CudaBuffer<f32>,
     device: &GpuDevice,
@@ -1707,14 +1404,13 @@ fn gpu_philox_f64(
     device: &GpuDevice,
     kernel_name: &'static str,
     ptx_src: String,
-    counters_needed: u64,
-    threads_needed: usize,
 ) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::PushKernelArg;
 
     if n == 0 {
         return alloc_zeros_f64(0, device);
     }
+    let policy = torch_distribution_policy(n, 2, device)?;
 
     let state = {
         let mut mgr = CUDA_RNG_MANAGER
@@ -1724,7 +1420,7 @@ fn gpu_philox_f64(
             })?;
         let rng_gen = mgr.generator(device.ordinal());
         let state = rng_gen.get_state();
-        rng_gen.advance(counters_needed);
+        rng_gen.advance(policy.counter_advance);
         state
     };
 
@@ -1740,24 +1436,25 @@ fn gpu_philox_f64(
     })?;
 
     let mut out = alloc_zeros_f64(n, device)?;
-    let cfg = rng_launch_cfg(threads_needed)?;
-    let n_u32 = n as u32;
+    let n_u64 = n as u64;
     let seed_lo = state.seed as u32;
     let seed_hi = (state.seed >> 32) as u32;
     let counter_lo = state.counter as u32;
     let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
 
     unsafe {
         device
             .stream()
             .launch_builder(&f)
             .arg(out.inner_mut())
-            .arg(&n_u32)
+            .arg(&n_u64)
             .arg(&seed_lo)
             .arg(&seed_hi)
             .arg(&counter_lo)
             .arg(&counter_hi)
-            .launch(cfg)?;
+            .arg(&stride)
+            .launch(policy.launch)?;
     }
 
     Ok(out)
@@ -1767,7 +1464,9 @@ fn gpu_philox_f64(
 /// Philox 4x32-10 algorithm.
 ///
 /// The values are generated entirely on device — no CPU-to-GPU transfer.
-/// The global RNG state for the device is advanced by `ceil(n/4)` counters.
+/// The per-device RNG state is advanced with PyTorch's CUDA distribution
+/// policy: each logical CUDA thread reserves enough Philox 4x32 counter groups
+/// for its grid-stride `float4` lane consumption.
 ///
 /// # Arguments
 ///
@@ -1781,6 +1480,7 @@ pub fn gpu_philox_uniform(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<
     if n == 0 {
         return alloc_zeros_f32(0, device);
     }
+    let policy = torch_distribution_policy(n, 4, device)?;
 
     // Get the current RNG state and advance it.
     let state = {
@@ -1791,19 +1491,17 @@ pub fn gpu_philox_uniform(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<
             })?;
         let rng_gen = mgr.generator(device.ordinal());
         let state = rng_gen.get_state();
-        // Advance the generator by ceil(n/4) counters (each counter produces 4 values)
-        let counters_needed = n.div_ceil(4);
-        rng_gen.advance(counters_needed as u64);
+        rng_gen.advance(policy.counter_advance);
         state
     };
 
     let ctx = device.context();
     let stream = device.stream();
 
-    let f = crate::module_cache::get_or_compile(
+    let f = crate::module_cache::get_or_compile_owned(
         ctx,
-        PHILOX_UNIFORM_PTX,
-        "philox_uniform_kernel",
+        PHILOX_UNIFORM_F32_PTX.as_str().to_owned(),
+        "philox_uniform_kernel".to_string(),
         device.ordinal() as u32,
     )
     .map_err(|e| GpuError::PtxCompileFailed {
@@ -1812,23 +1510,24 @@ pub fn gpu_philox_uniform(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<
     })?;
 
     let mut out = alloc_zeros_f32(n, device)?;
-    let cfg = rng_launch_cfg(n)?;
-    let n_u32 = n as u32;
+    let n_u64 = n as u64;
     let seed_lo = state.seed as u32;
     let seed_hi = (state.seed >> 32) as u32;
     let counter_lo = state.counter as u32;
     let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
 
     unsafe {
         stream
             .launch_builder(&f)
             .arg(out.inner_mut())
-            .arg(&n_u32)
+            .arg(&n_u64)
             .arg(&seed_lo)
             .arg(&seed_hi)
             .arg(&counter_lo)
             .arg(&counter_hi)
-            .launch(cfg)?;
+            .arg(&stride)
+            .launch(policy.launch)?;
     }
 
     Ok(out)
@@ -1848,10 +1547,9 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
     if n == 0 {
         return alloc_zeros_f32(0, device);
     }
+    let policy = torch_distribution_policy(n, 4, device)?;
 
     // Get the current RNG state and advance it.
-    // Each thread consumes one Philox 4-tuple (using 2 of 4 values for Box-Muller),
-    // and each thread produces 2 output values, so we need ceil(n/2) counters.
     let state = {
         let mut mgr = CUDA_RNG_MANAGER
             .lock()
@@ -1860,18 +1558,17 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
             })?;
         let rng_gen = mgr.generator(device.ordinal());
         let state = rng_gen.get_state();
-        let counters_needed = n.div_ceil(2);
-        rng_gen.advance(counters_needed as u64);
+        rng_gen.advance(policy.counter_advance);
         state
     };
 
     let ctx = device.context();
     let stream = device.stream();
 
-    let f = crate::module_cache::get_or_compile(
+    let f = crate::module_cache::get_or_compile_owned(
         ctx,
-        PHILOX_NORMAL_PTX,
-        "philox_normal_kernel",
+        PHILOX_NORMAL_F32_PTX.as_str().to_owned(),
+        "philox_normal_kernel".to_string(),
         device.ordinal() as u32,
     )
     .map_err(|e| GpuError::PtxCompileFailed {
@@ -1880,25 +1577,24 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
     })?;
 
     let mut out = alloc_zeros_f32(n, device)?;
-    // Each thread handles 2 elements, so we need ceil(n/2) threads.
-    let num_threads = n.div_ceil(2);
-    let cfg = rng_launch_cfg(num_threads)?;
-    let n_u32 = n as u32;
+    let n_u64 = n as u64;
     let seed_lo = state.seed as u32;
     let seed_hi = (state.seed >> 32) as u32;
     let counter_lo = state.counter as u32;
     let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
 
     unsafe {
         stream
             .launch_builder(&f)
             .arg(out.inner_mut())
-            .arg(&n_u32)
+            .arg(&n_u64)
             .arg(&seed_lo)
             .arg(&seed_hi)
             .arg(&counter_lo)
             .arg(&counter_hi)
-            .launch(cfg)?;
+            .arg(&stride)
+            .launch(policy.launch)?;
     }
 
     Ok(out)
@@ -1912,8 +1608,6 @@ pub fn gpu_philox_uniform_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuf
         device,
         "philox_uniform_f64_kernel",
         PHILOX_UNIFORM_F64_PTX.clone(),
-        n.div_ceil(2) as u64,
-        n,
     )
 }
 
@@ -1925,8 +1619,6 @@ pub fn gpu_philox_normal_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuff
         device,
         "philox_normal_f64_kernel",
         PHILOX_NORMAL_F64_PTX.clone(),
-        n.div_ceil(2) as u64,
-        n.div_ceil(2),
     )
 }
 

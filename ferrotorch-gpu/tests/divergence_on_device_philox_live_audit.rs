@@ -1,18 +1,18 @@
 //! Adversarial re-audit of the LIVE on-device Philox PTX kernels (#1684).
 //!
-//! Commit 2240fa9e2 fixed PHILOX_UNIFORM_PTX / PHILOX_NORMAL_PTX so they JIT
-//! and execute on the GPU for the first time (the `%tid` register shadow bug).
+//! Commit 2240fa9e2 fixed the original static uniform/normal PTX kernels so
+//! they JIT and execute on the GPU for the first time (the `%tid` register
+//! shadow bug).
 //! The prior audit (310a0c545) only verified the CPU fallback. These probes
 //! exercise the *on-device* kernel output directly on a live RTX 3090.
 //!
-//! Reference discipline (R-CHAR-3): the GPU uniform kernel is written to mirror
-//! the CPU `PhiloxGenerator` EXACTLY (output `i` = word `i%4` of Philox counter
-//! `base + i/4`, rng.rs:570-571 + next_f32 at rng.rs:236-241). The CPU
-//! PhiloxGenerator is the byte-exact-with-torch reference (#1683: "first value
-//! matches torch"). So a correct on-device uniform kernel MUST be bit-identical
-//! to `PhiloxGenerator::generate_uniform` for the same seed/counter. The expected
-//! values come from the CPU PhiloxGenerator (NOT from the GPU side, and NOT from
-//! `rand_on_device(Cpu)` which is a DIFFERENT algorithm — MT19937).
+//! Reference discipline (R-CHAR-3): `torch.rand(..., device="cuda")` uses
+//! PyTorch's CUDA distribution kernel (`DistributionTemplates.h`) which launches
+//! one cuRAND Philox state per logical CUDA thread:
+//! `curand_init(seed, thread_linear_idx, offset, &state)`. Each thread writes a
+//! `float4`/`double2` across grid-stride lanes. These probes compute that layout
+//! directly instead of comparing to Ferrotorch's CPU `PhiloxGenerator`, whose
+//! contiguous-counter stream was the bug tracked by #1683.
 //!
 //! The normal kernel uses .approx PTX transcendentals so it is NOT bit-identical
 //! to the libm CPU Box-Muller; for it we assert distribution moments against the
@@ -29,8 +29,7 @@
 #![cfg(feature = "cuda")]
 
 use ferrotorch_core::{Device, manual_seed, rand_on_device, randn_on_device};
-use ferrotorch_gpu::init_cuda_backend;
-use ferrotorch_gpu::rng::PhiloxGenerator;
+use ferrotorch_gpu::{GpuDevice, init_cuda_backend};
 use std::sync::Mutex;
 
 static SEED_LOCK: Mutex<()> = Mutex::new(());
@@ -51,24 +50,163 @@ fn to_host_f64(t: &ferrotorch_core::Tensor<f64>) -> Vec<f64> {
     cpu.data().expect("cpu data").to_vec()
 }
 
+const PHILOX_M0: u32 = 0xD251_1F53;
+const PHILOX_M1: u32 = 0xCD9E_8D57;
+const PHILOX_W0: u32 = 0x9E37_79B9;
+const PHILOX_W1: u32 = 0xBB67_AE85;
+
+fn philox_round(c: [u32; 4], k0: u32, k1: u32) -> [u32; 4] {
+    let prod0 = (PHILOX_M0 as u64) * (c[0] as u64);
+    let prod1 = (PHILOX_M1 as u64) * (c[2] as u64);
+    [
+        ((prod1 >> 32) as u32) ^ c[1] ^ k0,
+        prod1 as u32,
+        ((prod0 >> 32) as u32) ^ c[3] ^ k1,
+        prod0 as u32,
+    ]
+}
+
+fn philox4(seed: u64, counter: u64, subsequence: u64) -> [u32; 4] {
+    let mut c = [
+        counter as u32,
+        (counter >> 32) as u32,
+        subsequence as u32,
+        (subsequence >> 32) as u32,
+    ];
+    let mut k0 = seed as u32;
+    let mut k1 = (seed >> 32) as u32;
+    for round in 0..10 {
+        c = philox_round(c, k0, k1);
+        if round != 9 {
+            k0 = k0.wrapping_add(PHILOX_W0);
+            k1 = k1.wrapping_add(PHILOX_W1);
+        }
+    }
+    c
+}
+
+fn curand_uniform_f32_to_torch_rand(word: u32) -> f32 {
+    let v = (word as f32).mul_add(2.328_306_4e-10, 1.164_153_2e-10);
+    if v == 1.0 { 0.0 } else { v }
+}
+
+fn curand_uniform_f64_to_torch_rand(x: u32, y: u32) -> f64 {
+    let z = (x as u64) ^ ((y as u64) << 21);
+    let v = (z as f64).mul_add(1.110_223_024_625_156_5e-16, 5.551_115_123_125_783e-17);
+    if v == 1.0 { 0.0 } else { v }
+}
+
+fn torch_distribution_stride(n: usize, unroll_factor: u64) -> u64 {
+    let device = GpuDevice::new(0).expect("GpuDevice::new");
+    let max_threads_per_sm = device
+        .context()
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+        )
+        .expect("max threads per SM") as u64;
+    let sm_count = device
+        .context()
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+        )
+        .expect("SM count") as u64;
+    let block = 256u64;
+    let mut grid = (n as u64).div_ceil(block);
+    let blocks_per_sm = (max_threads_per_sm / block).max(1);
+    grid = grid.min((sm_count * blocks_per_sm).max(1)).max(1);
+    let stride = grid * block;
+    assert!(
+        (n as u64).div_ceil(stride * unroll_factor) > 0,
+        "non-empty policy must do at least one curand call per thread"
+    );
+    stride
+}
+
+fn torch_cuda_uniform_f32_reference(n: usize, seed: u64, base_counter: u64) -> Vec<f32> {
+    let stride = torch_distribution_stride(n, 4);
+    let mut out = vec![0.0; n];
+    for tid in 0..stride {
+        let mut linear = tid;
+        let mut counter = base_counter;
+        while linear < n as u64 {
+            let r = philox4(seed, counter, tid);
+            for (lane, word) in r.into_iter().enumerate() {
+                let idx = linear + stride * lane as u64;
+                if idx < n as u64 {
+                    out[idx as usize] = curand_uniform_f32_to_torch_rand(word);
+                }
+            }
+            linear += stride * 4;
+            counter += 1;
+        }
+    }
+    out
+}
+
+fn torch_cuda_uniform_f64_reference(n: usize, seed: u64, base_counter: u64) -> Vec<f64> {
+    let stride = torch_distribution_stride(n, 2);
+    let mut out = vec![0.0; n];
+    for tid in 0..stride {
+        let mut linear = tid;
+        let mut counter = base_counter;
+        while linear < n as u64 {
+            let r = philox4(seed, counter, tid);
+            let lanes = [
+                curand_uniform_f64_to_torch_rand(r[0], r[1]),
+                curand_uniform_f64_to_torch_rand(r[2], r[3]),
+            ];
+            for (lane, value) in lanes.into_iter().enumerate() {
+                let idx = linear + stride * lane as u64;
+                if idx < n as u64 {
+                    out[idx as usize] = value;
+                }
+            }
+            linear += stride * 2;
+            counter += 1;
+        }
+    }
+    out
+}
+
+fn calls_per_thread(n: usize, unroll_factor: u64) -> u64 {
+    let stride = torch_distribution_stride(n, unroll_factor);
+    ((n as u64 - 1) / (stride * unroll_factor)) + 1
+}
+
 /// PROBE 1+3 — UNIFORM on-device, boundary lengths (n not divisible by 4).
-/// Reference: CPU PhiloxGenerator (byte-exact-with-torch). A correct kernel is
-/// bit-identical at the awkward 4-lane boundaries n = 5, 7, 4097.
+/// Reference: PyTorch CUDA distribution layout. A correct kernel is
+/// bit-identical at awkward lane boundaries n = 5, 7, 4097.
 #[test]
-fn uniform_gpu_bit_exact_with_philox_reference_boundaries() {
+fn uniform_gpu_bit_exact_with_torch_cuda_layout_boundaries() {
     ensure_init();
     for &n in &[1usize, 4, 5, 7, 8, 4096, 4097] {
         let seed = 2024u64;
         let _g = SEED_LOCK.lock().unwrap();
         manual_seed(seed).unwrap();
         let gpu = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu uniform"));
-        let cpu = PhiloxGenerator::new(seed).generate_uniform(n);
+        let expected = torch_cuda_uniform_f32_reference(n, seed, 0);
         assert_eq!(gpu.len(), n, "gpu uniform wrong length at n={n}");
         assert_eq!(
-            gpu, cpu,
-            "on-device uniform kernel diverges from CPU Philox reference at n={n}"
+            gpu, expected,
+            "on-device uniform kernel diverges from torch.cuda Philox layout at n={n}"
         );
     }
+}
+
+/// PROBE 1+3 — force PyTorch's grid-stride unroll lanes. For tensors larger
+/// than the thread-grid cap, output positions consume x/y/z/w from each
+/// thread's Philox state before the per-thread counter advances.
+#[test]
+fn uniform_gpu_bit_exact_with_torch_cuda_layout_grid_stride_lanes() {
+    ensure_init();
+    let seed = 2025u64;
+    let stride = torch_distribution_stride(1_000_000, 4);
+    let n = (stride * 4 + 17) as usize;
+    let _g = SEED_LOCK.lock().unwrap();
+    manual_seed(seed).unwrap();
+    let gpu = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu uniform"));
+    let expected = torch_cuda_uniform_f32_reference(n, seed, 0);
+    assert_eq!(gpu, expected, "grid-stride f32 uniform layout mismatch");
 }
 
 /// PROBE 1 — UNIFORM range invariant: every on-device value strictly in [0,1).
@@ -88,15 +226,15 @@ fn uniform_gpu_strict_unit_interval() {
     }
 }
 
-/// PROBE 6 — consecutive on-device UNIFORM calls continue the stream. After a
-/// call of n, the manager advances ceil(n/4). The reference is a single CPU
-/// PhiloxGenerator stream of 2n: the first call must equal prefix [0..n), the
-/// second call must equal [n..2n) i.e. the continued Philox stream (n%4==0 so
-/// advance is exactly n/4 counters = n values, blocks are disjoint).
+/// PROBE 6 — consecutive on-device UNIFORM calls continue PyTorch's CUDA
+/// generator offset. After a call of n, PyTorch advances by
+/// calls_per_thread * 4 curand elements, i.e. calls_per_thread Philox counters
+/// in this manager's counter units.
 #[test]
-fn uniform_gpu_consecutive_calls_continue_philox_stream() {
+fn uniform_gpu_consecutive_calls_continue_torch_cuda_offset() {
     ensure_init();
-    let n = 4096usize;
+    let stride = torch_distribution_stride(1_000_000, 4);
+    let n = (stride * 4 + 17) as usize;
     let seed = 77u64;
     let (a, b) = {
         let _g = SEED_LOCK.lock().unwrap();
@@ -105,12 +243,15 @@ fn uniform_gpu_consecutive_calls_continue_philox_stream() {
         let b = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("b"));
         (a, b)
     };
-    let full = PhiloxGenerator::new(seed).generate_uniform(2 * n);
-    assert_eq!(a, full[..n].to_vec(), "first call != Philox prefix");
+    assert_eq!(
+        a,
+        torch_cuda_uniform_f32_reference(n, seed, 0),
+        "first call mismatch"
+    );
     assert_eq!(
         b,
-        full[n..].to_vec(),
-        "second on-device call does not continue the Philox stream (counter-advance mismatch)"
+        torch_cuda_uniform_f32_reference(n, seed, calls_per_thread(n, 4)),
+        "second on-device call does not continue torch.cuda Philox offset"
     );
 }
 
@@ -185,24 +326,49 @@ fn normal_gpu_moments_standard_normal() {
 /// odd lengths so both lanes of the two-u32 -> f64 packing and the last-lane
 /// guard run through the public backend API.
 #[test]
-fn uniform_f64_gpu_stays_resident_and_in_unit_interval() {
+fn uniform_f64_gpu_bit_exact_with_torch_cuda_layout() {
     ensure_init();
     for &n in &[1usize, 2, 3, 7, 4097] {
+        let seed = 2026u64;
         let t = {
             let _g = SEED_LOCK.lock().unwrap();
-            manual_seed(2026).unwrap();
+            manual_seed(seed).unwrap();
             rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 uniform")
         };
         assert_eq!(t.device(), Device::Cuda(0), "f64 uniform must stay CUDA");
         let v = to_host_f64(&t);
         assert_eq!(v.len(), n, "f64 uniform wrong length at n={n}");
-        for (i, &x) in v.iter().enumerate() {
-            assert!(
-                x.is_finite() && (0.0..1.0).contains(&x),
-                "f64 uniform value[{i}]={x} outside [0, 1) at n={n}"
-            );
-        }
+        assert_eq!(
+            v,
+            torch_cuda_uniform_f64_reference(n, seed, 0),
+            "f64 uniform torch.cuda layout mismatch at n={n}"
+        );
     }
+}
+
+#[test]
+fn uniform_f64_gpu_grid_stride_and_consecutive_calls_match_torch_cuda_layout() {
+    ensure_init();
+    let seed = 2027u64;
+    let stride = torch_distribution_stride(1_000_000, 2);
+    let n = (stride * 2 + 11) as usize;
+    let (a, b) = {
+        let _g = SEED_LOCK.lock().unwrap();
+        manual_seed(seed).unwrap();
+        let a = to_host_f64(&rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("a"));
+        let b = to_host_f64(&rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("b"));
+        (a, b)
+    };
+    assert_eq!(
+        a,
+        torch_cuda_uniform_f64_reference(n, seed, 0),
+        "f64 first grid-stride call mismatch"
+    );
+    assert_eq!(
+        b,
+        torch_cuda_uniform_f64_reference(n, seed, calls_per_thread(n, 2)),
+        "f64 second grid-stride call did not continue torch.cuda offset"
+    );
 }
 
 /// F64 NORMAL mirrors PyTorch's double Box-Muller structure: two 32-bit Philox

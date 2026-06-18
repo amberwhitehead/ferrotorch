@@ -8190,8 +8190,9 @@ impl GpuBackend for CudaBackendImpl {
     fn rand_uniform_f32(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         // On-device generation: `gpu_philox_uniform` snapshots and advances the
         // per-device Philox counter inside the CudaRngManager (same pattern as
-        // `dropout_philox_f32`), launches the PHILOX_UNIFORM_PTX kernel, and
-        // returns a `CudaBuffer<f32>` filled on the GPU — no CPU round trip.
+        // `dropout_philox_f32`), launches the resident PyTorch-layout Philox
+        // kernel, and returns a `CudaBuffer<f32>` filled on the GPU — no CPU
+        // round trip.
         // Mirrors `torch.rand(size, device='cuda')` =
         // `at::empty(...).uniform_(0,1)` at TensorFactories.cpp:1075-1076.
         let dev = self.default_device()?;
@@ -8219,7 +8220,7 @@ impl GpuBackend for CudaBackendImpl {
 
     fn randn_normal_f32(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         // f32 standard-normal counterpart of `rand_uniform_f32`, via the
-        // Box-Muller PHILOX_NORMAL_PTX kernel. Mirrors
+        // resident Box-Muller Philox kernel. Mirrors
         // `torch.randn(size, device='cuda')` = `at::empty(...).normal_(0,1)`.
         let dev = self.default_device()?;
         let buf = crate::rng::gpu_philox_normal(numel, dev).map_err(Self::map_gpu_err)?;
