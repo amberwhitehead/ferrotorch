@@ -16,10 +16,10 @@
 //! | REQ-6 | SHIPPED | `log1p`/`expm1` at `special.rs:714,721`; consumer: re-export at `lib.rs:187` |
 //! | REQ-7 | SHIPPED | `sinc` at `special.rs:726`; consumer: re-export at `lib.rs:187` |
 //! | REQ-8 | SHIPPED | `xlogy` at `special.rs:733`; consumer: re-export at `lib.rs:187` |
-//! | REQ-9 | SHIPPED | CPU: `chebyshev_polynomial_{t,u,v,w}`; GPU: `gpu_chebyshev_poly_f32`/`_f64` in `ferrotorch-gpu/src/special.rs` via `GpuBackend::chebyshev_poly_f32`/`_f64`; consumer: the CUDA branch (`poly_gpu_chebyshev`) of each `chebyshev_polynomial_*` dispatches on-device (#1545 / #1533) |
+//! | REQ-9 | SHIPPED | CPU: `chebyshev_polynomial_{t,u,v,w}` with PyTorch endpoint/closed-form branches; GPU: recurrence kernel plus CUDA-resident closed-form overlay in `poly_gpu_chebyshev`; consumer: the CUDA branch of each `chebyshev_polynomial_*` dispatches on-device (#1545 / #1533 / #1870) |
 //! | REQ-10 | SHIPPED | CPU: `hermite_polynomial_h`/`hermite_polynomial_he`; GPU: `gpu_hermite_h_poly_*`/`gpu_hermite_he_poly_*`; consumer: the CUDA branch (`poly_gpu_simple`) of each `hermite_polynomial_*` |
 //! | REQ-11 | SHIPPED | CPU: `laguerre_polynomial_l`/`legendre_polynomial_p`; GPU: `gpu_laguerre_poly_*`/`gpu_legendre_poly_*`; consumer: the CUDA branch of `laguerre_polynomial_l`/`legendre_polynomial_p` |
-//! | REQ-12 | SHIPPED | CPU: `shifted_chebyshev_polynomial_{t,u,v,w}`; GPU: `gpu_chebyshev_poly_f32`/`_f64` with `shift=true`; consumer: the CUDA branch of each `shifted_chebyshev_polynomial_*` |
+//! | REQ-12 | SHIPPED | CPU: `shifted_chebyshev_polynomial_{t,u,v,w}` with PyTorch's shifted thresholds; GPU: `poly_gpu_chebyshev` maps `2x-1` on device and applies the same CUDA-resident closed-form overlay; consumer: the CUDA branch of each `shifted_chebyshev_polynomial_*` |
 //! | REQ-13 | SHIPPED | pub fn `gammainc`/`gammaincc` mirror `torch.special.gammainc`/`gammaincc`; consumer: re-exported at top of `lib.rs` as `ferrotorch_core::{gammainc, gammaincc}` (S5: torch.special public surface IS the consumer) |
 //! | REQ-14 | SHIPPED | pub fn `log_beta`/`beta` mirror `scipy.special.betaln`/`beta`; consumer: re-exported as `ferrotorch_core::{log_beta, beta}` |
 //! | REQ-15 | SHIPPED | pub fn `multigammaln`/`mvlgamma` mirror `torch.special.multigammaln`/`torch.mvlgamma`; consumer: re-exported as `ferrotorch_core::{multigammaln, mvlgamma}` |
@@ -5440,14 +5440,152 @@ fn special_gpu_binary_broadcast<T: Float>(
     })
 }
 
-/// Chebyshev-family GPU dispatch (T/U/V/W + shifted), selecting the kind via
-/// the `(seed_a, seed_b, shift)` recurrence seed. See [`poly_gpu_simple`] for
-/// the `Ok(None)` CPU-fallthrough contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChebyshevKind {
+    T,
+    U,
+    V,
+    W,
+}
+
+impl ChebyshevKind {
+    #[inline]
+    fn recurrence_seed(self) -> (f64, f64) {
+        match self {
+            ChebyshevKind::T => (1.0, 0.0),
+            ChebyshevKind::U => (2.0, 0.0),
+            ChebyshevKind::V => (2.0, -1.0),
+            ChebyshevKind::W => (2.0, 1.0),
+        }
+    }
+
+    #[inline]
+    fn torch_closed_form_threshold(self, shifted: bool) -> usize {
+        match (self, shifted) {
+            (ChebyshevKind::T, _) | (ChebyshevKind::U | ChebyshevKind::V, true) => 6,
+            (ChebyshevKind::U | ChebyshevKind::V | ChebyshevKind::W, false) => 8,
+            (ChebyshevKind::W, true) => 4,
+        }
+    }
+}
+
+fn chebyshev_effective_cuda_input<T: Float>(
+    input: &Tensor<T>,
+    shift: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if !shift {
+        return Ok(input.clone());
+    }
+    let doubled = mul_const_like(input, 2.0, op)?;
+    add_const_like(&doubled, -1.0, op)
+}
+
+fn chebyshev_closed_form_cuda<T: Float>(
+    xx: &Tensor<T>,
+    n: usize,
+    kind: ChebyshevKind,
+    shifted: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if poly_is_f32::<T>() {
+        let xx_f64 = xx.to_dtype::<f64>()?;
+        let closed_f64 = chebyshev_closed_form_cuda_f64(&xx_f64, n, kind, shifted, op)?;
+        return closed_f64.to_dtype::<T>();
+    }
+    chebyshev_closed_form_cuda_native(xx, n, kind, shifted, op)
+}
+
+fn chebyshev_closed_form_cuda_f64(
+    xx: &Tensor<f64>,
+    n: usize,
+    kind: ChebyshevKind,
+    shifted: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<f64>> {
+    chebyshev_closed_form_cuda_native(xx, n, kind, shifted, op)
+}
+
+fn chebyshev_closed_form_cuda_native<T: Float>(
+    xx: &Tensor<T>,
+    n: usize,
+    kind: ChebyshevKind,
+    shifted: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let one = full_like_scalar(xx, 1.0, op)?;
+    let xx_sq = crate::grad_fns::arithmetic::mul(xx, xx)?;
+    let one_minus_xx_sq = crate::grad_fns::arithmetic::sub(&one, &xx_sq)?;
+    let sin_theta = crate::grad_fns::arithmetic::sqrt(&one_minus_xx_sq)?;
+    let theta = crate::grad_fns::transcendental::atan2(&sin_theta, xx)?;
+    match kind {
+        ChebyshevKind::T => {
+            let angle = mul_const_like(&theta, n as f64, op)?;
+            crate::grad_fns::transcendental::cos(&angle)
+        }
+        ChebyshevKind::U => {
+            let n_plus_one = n as f64 + 1.0;
+            let denom = crate::grad_fns::transcendental::sin(&theta)?;
+            let angle = mul_const_like(&theta, n_plus_one, op)?;
+            let numer = crate::grad_fns::transcendental::sin(&angle)?;
+            let main = crate::grad_fns::arithmetic::div(&numer, &denom)?;
+            let cos_angle = crate::grad_fns::transcendental::cos(&angle)?;
+            let scaled = mul_const_like(&cos_angle, n_plus_one, op)?;
+            let fallback = crate::grad_fns::arithmetic::div(&scaled, xx)?;
+            let zero = full_like_scalar(&denom, 0.0, op)?;
+            let denom_nonzero = BoolTensor::ne(&denom, &zero)?;
+            crate::grad_fns::comparison::where_bt(&denom_nonzero, &main, &fallback)
+        }
+        ChebyshevKind::V => {
+            let half_theta = mul_const_like(&theta, 0.5, op)?;
+            let sin_half = crate::grad_fns::transcendental::sin(&half_theta)?;
+            let cos_half = crate::grad_fns::transcendental::cos(&half_theta)?;
+            let angle = mul_const_like(&theta, n as f64 + 0.5, op)?;
+            let numer = crate::grad_fns::transcendental::cos(&angle)?;
+            let main = crate::grad_fns::arithmetic::div(&numer, &cos_half)?;
+            let endpoint = if n.is_multiple_of(2) {
+                (n as f64) + (n as f64) + 1.0
+            } else {
+                -((n as f64) + (n as f64) + 1.0)
+            };
+            let fallback = full_like_scalar(xx, endpoint, op)?;
+            let one = full_like_scalar(&sin_half, 1.0, op)?;
+            let use_main = BoolTensor::ne(&sin_half, &one)?;
+            crate::grad_fns::comparison::where_bt(&use_main, &main, &fallback)
+        }
+        ChebyshevKind::W => {
+            let half_theta = mul_const_like(&theta, 0.5, op)?;
+            let sin_half = crate::grad_fns::transcendental::sin(&half_theta)?;
+            let cos_half = crate::grad_fns::transcendental::cos(&half_theta)?;
+            let angle = mul_const_like(&theta, n as f64 + 0.5, op)?;
+            let numer = crate::grad_fns::transcendental::sin(&angle)?;
+            let main = crate::grad_fns::arithmetic::div(&numer, &sin_half)?;
+            let parity_endpoint = if n.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let fallback = if shifted {
+                full_like_scalar(xx, parity_endpoint, op)?
+            } else {
+                let zero = full_like_scalar(xx, 0.0, op)?;
+                let gt_zero = BoolTensor::gt(xx, &zero)?;
+                let pos_endpoint = full_like_scalar(xx, (n as f64) + (n as f64) + 1.0, op)?;
+                let neg_endpoint = full_like_scalar(xx, parity_endpoint, op)?;
+                crate::grad_fns::comparison::where_bt(&gt_zero, &pos_endpoint, &neg_endpoint)?
+            };
+            let one = full_like_scalar(&cos_half, 1.0, op)?;
+            let use_main = BoolTensor::ne(&cos_half, &one)?;
+            crate::grad_fns::comparison::where_bt(&use_main, &main, &fallback)
+        }
+    }
+}
+
+/// Chebyshev-family GPU dispatch (T/U/V/W + shifted). The backend kernel is
+/// the three-term recurrence primitive; the public core path overlays
+/// PyTorch's high-order closed-form branch on CUDA using resident tensor ops
+/// (`atan2`, `sqrt`, `sin`, `cos`, masks, and `where`) so no host fallback or
+/// full-buffer round trip is introduced.
 fn poly_gpu_chebyshev<T: Float>(
     input: &Tensor<T>,
     n: usize,
-    seed_a: f64,
-    seed_b: f64,
+    kind: ChebyshevKind,
     shift: bool,
     op: &'static str,
 ) -> FerrotorchResult<Option<Tensor<T>>> {
@@ -5462,15 +5600,36 @@ fn poly_gpu_chebyshev<T: Float>(
     // before the chebyshev recurrence kernel reads element 0.
     let input = input.contiguous()?;
     let handle = input.gpu_handle()?;
+    let (seed_a, seed_b) = kind.recurrence_seed();
     let out_handle = if poly_is_f32::<T>() {
         backend.chebyshev_poly_f32(handle, n, seed_a as f32, seed_b as f32, shift)?
     } else {
         backend.chebyshev_poly_f64(handle, n, seed_a, seed_b, shift)?
     };
-    Ok(Some(poly_gpu_output::<T>(
-        out_handle,
-        input.shape().to_vec(),
-    )?))
+    let recurrence = poly_gpu_output::<T>(out_handle, input.shape().to_vec())?;
+    if n <= kind.torch_closed_form_threshold(shift) || input.numel() == 0 {
+        return Ok(Some(recurrence));
+    }
+
+    no_grad(|| {
+        let xx = chebyshev_effective_cuda_input(&input, shift, op)?;
+        let abs_xx = crate::grad_fns::arithmetic::abs(&xx)?;
+        let one = full_like_scalar(&xx, 1.0, op)?;
+        let interior = BoolTensor::lt(&abs_xx, &one)?;
+
+        // The closed-form trig branch is valid only for |x| < 1. Feed a safe
+        // placeholder elsewhere so masked-off values cannot introduce NaNs or
+        // hidden autograd edges; the final where keeps recurrence results at
+        // endpoints and outside the Chebyshev interval.
+        let zero = full_like_scalar(&xx, 0.0, op)?;
+        let safe_xx = crate::grad_fns::comparison::where_bt(&interior, &xx, &zero)?;
+        let closed = chebyshev_closed_form_cuda(&safe_xx, n, kind, shift, op)?;
+        Ok(Some(crate::grad_fns::comparison::where_bt(
+            &interior,
+            &closed,
+            &recurrence,
+        )?))
+    })
 }
 
 /// Apply a NATIVE-`T` evaluator to every element of a CPU tensor. The GPU
@@ -5525,7 +5684,9 @@ pub fn chebyshev_polynomial_t<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = poly_gpu_chebyshev(input, n, 1.0, 0.0, false, "chebyshev_polynomial_t")? {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, ChebyshevKind::T, false, "chebyshev_polynomial_t")?
+    {
         return Ok(out);
     }
     elementwise_native(input, "chebyshev_polynomial_t", move |x| chebyshev_t(n, x))
@@ -5540,7 +5701,9 @@ pub fn chebyshev_polynomial_u<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 0.0, false, "chebyshev_polynomial_u")? {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, ChebyshevKind::U, false, "chebyshev_polynomial_u")?
+    {
         return Ok(out);
     }
     elementwise_native(input, "chebyshev_polynomial_u", move |x| chebyshev_u(n, x))
@@ -5554,7 +5717,9 @@ pub fn chebyshev_polynomial_v<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, -1.0, false, "chebyshev_polynomial_v")? {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, ChebyshevKind::V, false, "chebyshev_polynomial_v")?
+    {
         return Ok(out);
     }
     elementwise_native(input, "chebyshev_polynomial_v", move |x| chebyshev_v(n, x))
@@ -5568,7 +5733,9 @@ pub fn chebyshev_polynomial_w<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 1.0, false, "chebyshev_polynomial_w")? {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, ChebyshevKind::W, false, "chebyshev_polynomial_w")?
+    {
         return Ok(out);
     }
     elementwise_native(input, "chebyshev_polynomial_w", move |x| chebyshev_w(n, x))
@@ -5668,14 +5835,17 @@ pub fn shifted_chebyshev_polynomial_t<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) =
-        poly_gpu_chebyshev(input, n, 1.0, 0.0, true, "shifted_chebyshev_polynomial_t")?
-    {
+    if let Some(out) = poly_gpu_chebyshev(
+        input,
+        n,
+        ChebyshevKind::T,
+        true,
+        "shifted_chebyshev_polynomial_t",
+    )? {
         return Ok(out);
     }
     elementwise_native(input, "shifted_chebyshev_polynomial_t", move |x| {
-        let one = nt_one::<T>();
-        chebyshev_t(n, x + x - one)
+        shifted_chebyshev_t(n, x)
     })
 }
 
@@ -5684,14 +5854,17 @@ pub fn shifted_chebyshev_polynomial_u<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) =
-        poly_gpu_chebyshev(input, n, 2.0, 0.0, true, "shifted_chebyshev_polynomial_u")?
-    {
+    if let Some(out) = poly_gpu_chebyshev(
+        input,
+        n,
+        ChebyshevKind::U,
+        true,
+        "shifted_chebyshev_polynomial_u",
+    )? {
         return Ok(out);
     }
     elementwise_native(input, "shifted_chebyshev_polynomial_u", move |x| {
-        let one = nt_one::<T>();
-        chebyshev_u(n, x + x - one)
+        shifted_chebyshev_u(n, x)
     })
 }
 
@@ -5700,14 +5873,17 @@ pub fn shifted_chebyshev_polynomial_v<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) =
-        poly_gpu_chebyshev(input, n, 2.0, -1.0, true, "shifted_chebyshev_polynomial_v")?
-    {
+    if let Some(out) = poly_gpu_chebyshev(
+        input,
+        n,
+        ChebyshevKind::V,
+        true,
+        "shifted_chebyshev_polynomial_v",
+    )? {
         return Ok(out);
     }
     elementwise_native(input, "shifted_chebyshev_polynomial_v", move |x| {
-        let one = nt_one::<T>();
-        chebyshev_v(n, x + x - one)
+        shifted_chebyshev_v(n, x)
     })
 }
 
@@ -5716,19 +5892,22 @@ pub fn shifted_chebyshev_polynomial_w<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) =
-        poly_gpu_chebyshev(input, n, 2.0, 1.0, true, "shifted_chebyshev_polynomial_w")?
-    {
+    if let Some(out) = poly_gpu_chebyshev(
+        input,
+        n,
+        ChebyshevKind::W,
+        true,
+        "shifted_chebyshev_polynomial_w",
+    )? {
         return Ok(out);
     }
     elementwise_native(input, "shifted_chebyshev_polynomial_w", move |x| {
-        let one = nt_one::<T>();
-        chebyshev_w(n, x + x - one)
+        shifted_chebyshev_w(n, x)
     })
 }
 
 // ---------------------------------------------------------------------------
-// Internal scalar evaluators (three-term recurrences in NATIVE `T`)
+// Internal scalar evaluators (PyTorch branches + native-`T` recurrences)
 // ---------------------------------------------------------------------------
 //
 // Each evaluator is a byte-for-relevant mirror of the matching
@@ -5747,6 +5926,44 @@ pub fn shifted_chebyshev_polynomial_w<T: Float>(
 #[inline]
 fn nt_from_usize<T: Float>(k: usize) -> T {
     T::from(k).unwrap_or_else(T::nan)
+}
+
+#[inline]
+fn nt_half<T: Float>() -> T {
+    T::from(0.5).unwrap_or_else(T::nan)
+}
+
+#[inline]
+fn nt_n_plus_one<T: Float>(n: usize) -> T {
+    nt_from_usize::<T>(n) + nt_one::<T>()
+}
+
+#[inline]
+fn nt_two_n_plus_one<T: Float>(n: usize) -> T {
+    let nf = nt_from_usize::<T>(n);
+    nf + nf + nt_one::<T>()
+}
+
+#[inline]
+fn chebyshev_recurrence<T: Float>(n: usize, x: T, seed_a: T, seed_b: T) -> T {
+    let one = nt_one::<T>();
+    if n == 0 {
+        return one;
+    }
+    let mut prev2 = one;
+    let mut prev1 = seed_a * x + seed_b;
+    if n == 1 {
+        return prev1;
+    }
+    for _ in 2..=n {
+        if prev1.is_nan() {
+            break;
+        }
+        let next = (x + x) * prev1 - prev2;
+        prev2 = prev1;
+        prev1 = next;
+    }
+    prev1
 }
 
 /// `H_n(x)` (physicist's Hermite) via three-term recurrence
@@ -5796,95 +6013,212 @@ fn hermite_he<T: Float>(n: usize, x: T) -> T {
 
 /// `T_n(x)` via direct recurrence in native `T` — also used internally for the
 /// shifted variant. Mirrors `chebyshev_polynomial_t_forward<T>`
-/// (`Math.h:2861-2871`) including the `&& !std::isnan(q)` latch.
+/// (`Math.h:2836-2871`) including endpoint and high-order closed-form
+/// branches plus the `&& !std::isnan(q)` recurrence latch.
 fn chebyshev_t<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
     let one = nt_one::<T>();
-    if n == 0 {
-        return one;
+    let abs_x = x.abs();
+    if abs_x == one {
+        return if x > zero || n.is_multiple_of(2) {
+            one
+        } else {
+            -one
+        };
     }
-    if n == 1 {
-        return x;
+    if n > 6 && abs_x < one {
+        return (nt_from_usize::<T>(n) * x.acos()).cos();
     }
-    let mut prev2 = one;
-    let mut prev1 = x;
-    for _ in 2..=n {
-        if prev1.is_nan() {
-            break;
-        }
-        let next = (x + x) * prev1 - prev2;
-        prev2 = prev1;
-        prev1 = next;
-    }
-    prev1
+    chebyshev_recurrence(n, x, one, zero)
 }
 
 /// `U_n(x)` in native `T`. Mirrors `chebyshev_polynomial_u_forward<T>`
-/// (`Math.h:2909-2919`) including the `&& !std::isnan(q)` latch.
+/// (`Math.h:2880-2919`) including endpoint and high-order closed-form
+/// branches plus the `&& !std::isnan(q)` recurrence latch.
 fn chebyshev_u<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
     let one = nt_one::<T>();
-    if n == 0 {
-        return one;
+    let two = one + one;
+    let abs_x = x.abs();
+    if abs_x == one {
+        let endpoint = nt_n_plus_one::<T>(n);
+        return if x > zero || n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
     }
-    if n == 1 {
-        return x + x;
-    }
-    let mut prev2 = one;
-    let mut prev1 = x + x;
-    for _ in 2..=n {
-        if prev1.is_nan() {
-            break;
+    if n > 8 && abs_x < one {
+        let theta = x.acos();
+        let denom = theta.sin();
+        let n_plus_one = nt_n_plus_one::<T>(n);
+        if denom != zero {
+            return (n_plus_one * theta).sin() / denom;
         }
-        let next = (x + x) * prev1 - prev2;
-        prev2 = prev1;
-        prev1 = next;
+        return n_plus_one * (n_plus_one * theta).cos() / x;
     }
-    prev1
+    chebyshev_recurrence(n, x, two, zero)
 }
 
 /// `V_n(x)` in native `T`. Mirrors `chebyshev_polynomial_v_forward<T>`
-/// (`Math.h:2965-2975`) including the `&& !std::isnan(q)` latch.
+/// (`Math.h:2928-2975`) including endpoint and high-order closed-form
+/// branches plus the `&& !std::isnan(q)` recurrence latch.
 fn chebyshev_v<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
     let one = nt_one::<T>();
-    if n == 0 {
-        return one;
-    }
-    if n == 1 {
-        return x + x - one;
-    }
-    let mut prev2 = one;
-    let mut prev1 = x + x - one;
-    for _ in 2..=n {
-        if prev1.is_nan() {
-            break;
+    let two = one + one;
+    let abs_x = x.abs();
+    if abs_x == one {
+        if x > zero {
+            return one;
         }
-        let next = (x + x) * prev1 - prev2;
-        prev2 = prev1;
-        prev1 = next;
+        let endpoint = nt_two_n_plus_one::<T>(n);
+        return if n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
     }
-    prev1
+    if n > 8 && abs_x < one {
+        let theta = x.acos();
+        let half_theta = theta / two;
+        if half_theta.sin() != one {
+            return ((nt_from_usize::<T>(n) + nt_half::<T>()) * theta).cos() / half_theta.cos();
+        }
+        let endpoint = nt_two_n_plus_one::<T>(n);
+        return if n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
+    }
+    chebyshev_recurrence(n, x, two, -one)
 }
 
 /// `W_n(x)` in native `T`. Mirrors `chebyshev_polynomial_w_forward<T>`
-/// (`Math.h:3025-3035`) including the `&& !std::isnan(q)` latch.
+/// (`Math.h:2984-3035`) including endpoint and high-order closed-form
+/// branches plus the `&& !std::isnan(q)` recurrence latch.
 fn chebyshev_w<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
     let one = nt_one::<T>();
-    if n == 0 {
+    let two = one + one;
+    let abs_x = x.abs();
+    if abs_x == one {
+        if x > zero {
+            return nt_two_n_plus_one::<T>(n);
+        }
+        return if n.is_multiple_of(2) { one } else { -one };
+    }
+    if n > 8 && abs_x < one {
+        let theta = x.acos();
+        let half_theta = theta / two;
+        if half_theta.cos() != one {
+            return ((nt_from_usize::<T>(n) + nt_half::<T>()) * theta).sin() / half_theta.sin();
+        }
+        if x > zero {
+            return nt_two_n_plus_one::<T>(n);
+        }
+        return if n.is_multiple_of(2) { one } else { -one };
+    }
+    chebyshev_recurrence(n, x, two, one)
+}
+
+fn shifted_chebyshev_t<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
+    let one = nt_one::<T>();
+    if x == one {
         return one;
     }
-    if n == 1 {
-        return x + x + one;
+    if x == zero {
+        return if n.is_multiple_of(2) { one } else { -one };
     }
-    let mut prev2 = one;
-    let mut prev1 = x + x + one;
-    for _ in 2..=n {
-        if prev1.is_nan() {
-            break;
+    let xx = x + x - one;
+    if n > 6 && xx.abs() < one {
+        return (nt_from_usize::<T>(n) * xx.acos()).cos();
+    }
+    chebyshev_recurrence(n, xx, one, zero)
+}
+
+fn shifted_chebyshev_u<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
+    let one = nt_one::<T>();
+    let two = one + one;
+    if x == one {
+        return nt_n_plus_one::<T>(n);
+    }
+    if x == zero {
+        let endpoint = nt_n_plus_one::<T>(n);
+        return if n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
+    }
+    let xx = x + x - one;
+    if n > 6 && xx.abs() < one {
+        let theta = xx.acos();
+        let denom = theta.sin();
+        let n_plus_one = nt_n_plus_one::<T>(n);
+        if denom != zero {
+            return (n_plus_one * theta).sin() / denom;
         }
-        let next = (x + x) * prev1 - prev2;
-        prev2 = prev1;
-        prev1 = next;
+        return n_plus_one * (n_plus_one * theta).cos() / xx;
     }
-    prev1
+    chebyshev_recurrence(n, xx, two, zero)
+}
+
+fn shifted_chebyshev_v<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
+    let one = nt_one::<T>();
+    let two = one + one;
+    if x == one {
+        return one;
+    }
+    if x == zero {
+        let endpoint = nt_two_n_plus_one::<T>(n);
+        return if n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
+    }
+    let xx = x + x - one;
+    if n > 6 && xx.abs() < one {
+        let theta = xx.acos();
+        let half_theta = theta / two;
+        if half_theta.sin() != one {
+            return ((nt_from_usize::<T>(n) + nt_half::<T>()) * theta).cos() / half_theta.cos();
+        }
+        let endpoint = nt_two_n_plus_one::<T>(n);
+        return if n.is_multiple_of(2) {
+            endpoint
+        } else {
+            -endpoint
+        };
+    }
+    chebyshev_recurrence(n, xx, two, -one)
+}
+
+fn shifted_chebyshev_w<T: Float>(n: usize, x: T) -> T {
+    let zero = nt_zero::<T>();
+    let one = nt_one::<T>();
+    let two = one + one;
+    if x == one {
+        return nt_two_n_plus_one::<T>(n);
+    }
+    if x == zero {
+        return if n.is_multiple_of(2) { one } else { -one };
+    }
+    let xx = x + x - one;
+    if n > 4 && xx.abs() < one {
+        let theta = xx.acos();
+        let half_theta = theta / two;
+        if half_theta.cos() != one {
+            return ((nt_from_usize::<T>(n) + nt_half::<T>()) * theta).sin() / half_theta.sin();
+        }
+        return if n.is_multiple_of(2) { one } else { -one };
+    }
+    chebyshev_recurrence(n, xx, two, one)
 }
 
 /// `L_n(x)` in native `T`. Mirrors `laguerre_polynomial_l_forward<T>`
@@ -6373,7 +6707,7 @@ mod tests {
             let r = chebyshev_polynomial_t(&pts, n).unwrap();
             let d = r.data().unwrap();
             assert!(close(d[0], 1.0, 1e-12), "T_{n}(1) = {}", d[0]);
-            let expected_neg = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let expected_neg = if n.is_multiple_of(2) { 1.0 } else { -1.0 };
             assert!(close(d[1], expected_neg, 1e-12), "T_{n}(-1) = {}", d[1]);
         }
     }
@@ -6546,7 +6880,7 @@ mod tests {
             let r = legendre_polynomial_p(&pts, n).unwrap();
             let d = r.data().unwrap();
             assert!(close(d[0], 1.0, 1e-12), "P_{n}(1) = {}", d[0]);
-            let expected_neg = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let expected_neg = if n.is_multiple_of(2) { 1.0 } else { -1.0 };
             assert!(close(d[1], expected_neg, 1e-12), "P_{n}(-1) = {}", d[1]);
         }
     }
