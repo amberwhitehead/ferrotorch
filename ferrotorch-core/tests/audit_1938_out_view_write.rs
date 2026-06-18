@@ -155,6 +155,7 @@ mod gpu {
     use ferrotorch_core::Device;
     use ferrotorch_core::creation::from_vec;
     use ferrotorch_core::grad_fns::arithmetic::add_out;
+    use ferrotorch_core::tensor::Tensor;
 
     static GPU_INIT: Once = Once::new();
 
@@ -163,6 +164,50 @@ mod gpu {
             ferrotorch_gpu::init_cuda_backend()
                 .expect("CUDA backend must initialize for the #1938 GPU suite");
         });
+    }
+
+    fn cuda_f16(vals: &[f32], shape: &[usize]) -> Tensor<half::f16> {
+        let data: Vec<half::f16> = vals.iter().copied().map(half::f16::from_f32).collect();
+        from_vec::<half::f16>(data, shape)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+    }
+
+    fn cuda_bf16(vals: &[f32], shape: &[usize]) -> Tensor<half::bf16> {
+        let data: Vec<half::bf16> = vals.iter().copied().map(half::bf16::from_f32).collect();
+        from_vec::<half::bf16>(data, shape)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+    }
+
+    fn host_f16(t: &Tensor<half::f16>) -> Vec<f32> {
+        assert!(
+            t.is_cuda(),
+            "tensor must remain CUDA-resident before readback"
+        );
+        t.to(Device::Cpu)
+            .unwrap()
+            .data_vec()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_f32())
+            .collect()
+    }
+
+    fn host_bf16(t: &Tensor<half::bf16>) -> Vec<f32> {
+        assert!(
+            t.is_cuda(),
+            "tensor must remain CUDA-resident before readback"
+        );
+        t.to(Device::Cpu)
+            .unwrap()
+            .data_vec()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_f32())
+            .collect()
     }
 
     /// CUDA mirror of the critic's offset-view divergence: the f32 path
@@ -225,40 +270,68 @@ mod gpu {
     fn add_out_subview_cuda_bf16_writes_in_place() {
         ensure_cuda_backend();
 
-        let mk = |vals: &[f32], shape: &[usize]| {
-            let bf: Vec<half::bf16> = vals.iter().copied().map(half::bf16::from_f32).collect();
-            from_vec::<half::bf16>(bf, shape)
-                .unwrap()
-                .to(Device::Cuda(0))
-                .unwrap()
-        };
-        let base = mk(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        let base = cuda_bf16(&[1.0, 2.0, 3.0, 4.0], &[4]);
         let v = base.stride_view(vec![2], vec![1], 2);
-        let a = mk(&[10.0, 20.0], &[2]);
-        let b = mk(&[100.0, 200.0], &[2]);
+        let a = cuda_bf16(&[10.0, 20.0], &[2]);
+        let b = cuda_bf16(&[100.0, 200.0], &[2]);
 
         add_out(&v, &a, &b).unwrap();
 
         assert!(v.is_cuda(), "out view must stay CUDA-resident");
         assert!(base.is_cuda(), "base must stay CUDA-resident");
         assert_eq!(base.storage().len(), 4);
+        assert_eq!(host_bf16(&base), vec![1.0, 2.0, 110.0, 220.0]);
+        assert_eq!(host_bf16(&v), vec![110.0, 220.0]);
+    }
 
-        let base_host = base.to(Device::Cpu).unwrap();
-        let base_vals: Vec<f32> = base_host
-            .data_vec()
-            .unwrap()
-            .iter()
-            .map(|x| x.to_f32())
-            .collect();
-        assert_eq!(base_vals, vec![1.0, 2.0, 110.0, 220.0]);
+    /// CUDA reduced-dtype non-contiguous `out=` must use the u16
+    /// strided-scatter kernel, not a contiguous write or host round-trip.
+    /// PyTorch 2.11 CUDA oracle for both f16 and bf16:
+    /// `base=[1..6]; v=base.as_strided((3,), (2,)); add([10,20,30],
+    /// [100,200,300], out=v)` -> `[110,2,220,4,330,6]`.
+    #[test]
+    fn add_out_stride2_cuda_reduced_dtypes_write_through_strides() {
+        ensure_cuda_backend();
 
-        let v_host = v.to(Device::Cpu).unwrap();
-        let v_vals: Vec<f32> = v_host
-            .data_vec()
-            .unwrap()
-            .iter()
-            .map(|x| x.to_f32())
-            .collect();
-        assert_eq!(v_vals, vec![110.0, 220.0]);
+        let base = cuda_f16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]);
+        let v = base.stride_view(vec![3], vec![2], 0);
+        let a = cuda_f16(&[10.0, 20.0, 30.0], &[3]);
+        let b = cuda_f16(&[100.0, 200.0, 300.0], &[3]);
+        add_out(&v, &a, &b).unwrap();
+        assert_eq!(base.storage().len(), 6);
+        assert_eq!(host_f16(&base), vec![110.0, 2.0, 220.0, 4.0, 330.0, 6.0]);
+        assert_eq!(host_f16(&v), vec![110.0, 220.0, 330.0]);
+
+        let base = cuda_bf16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]);
+        let v = base.stride_view(vec![3], vec![2], 0);
+        let a = cuda_bf16(&[10.0, 20.0, 30.0], &[3]);
+        let b = cuda_bf16(&[100.0, 200.0, 300.0], &[3]);
+        add_out(&v, &a, &b).unwrap();
+        assert_eq!(base.storage().len(), 6);
+        assert_eq!(host_bf16(&base), vec![110.0, 2.0, 220.0, 4.0, 330.0, 6.0]);
+        assert_eq!(host_bf16(&v), vec![110.0, 220.0, 330.0]);
+    }
+
+    /// In-place broadcast on a reduced-dtype CUDA sub-view routes through
+    /// `Tensor::update_storage` just like `out=`, so it must preserve the
+    /// surrounding storage and write only the view positions.
+    #[test]
+    fn mul_inplace_broadcast_cuda_f16_subview_preserves_base() {
+        ensure_cuda_backend();
+
+        let base = cuda_f16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8]);
+        let v = base.stride_view(vec![2, 2], vec![2, 1], 4);
+        let other = cuda_f16(&[10.0, 100.0], &[1, 2]);
+
+        v.mul_(&other).unwrap();
+
+        assert!(v.is_cuda(), "in-place view must stay CUDA-resident");
+        assert!(base.is_cuda(), "base must stay CUDA-resident");
+        assert_eq!(base.storage().len(), 8);
+        assert_eq!(
+            host_f16(&base),
+            vec![1.0, 2.0, 3.0, 4.0, 50.0, 600.0, 70.0, 800.0]
+        );
+        assert_eq!(host_f16(&v), vec![50.0, 600.0, 70.0, 800.0]);
     }
 }
