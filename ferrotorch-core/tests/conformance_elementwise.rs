@@ -2369,27 +2369,12 @@ fn cpu_fast_log_and_sigmoid_special() {
                         _ => fast_sigmoid(&a).expect("fast_sigmoid"),
                     };
                     let actual = read_back_f32(&r);
-                    if op_name == "fast_log_special" {
-                        // #1931 pin: fast_log's f32 vector kernel assumes a
-                        // normalized mantissa; the subnormal input (index 5
-                        // = 1e-40) yields -88.021 instead of torch's
-                        // -92.10341 (fixture). Pin the current divergence;
-                        // when #1931 lands this assert fails — retire it
-                        // and compare the whole vector against the fixture.
-                        assert!(
-                            (f64::from(actual[5]) - exp[5]).abs() > 1.0,
-                            "{label}: fast_log(subnormal) now matches torch \
-                             — #1931 appears fixed; retire this pin"
-                        );
-                        check_f32(
-                            &format!("{label} non-pinned head"),
-                            &actual[..5],
-                            &exp[..5],
-                            tolerance::F32_FAST,
-                        );
-                    } else {
-                        check_f32(&label, &actual, exp, tolerance::F32_FAST);
-                    }
+                    // #1931 fixed: fast_log's f32 vector kernel now delegates
+                    // positive subnormals to f32::ln(), matching PyTorch's
+                    // full-domain SLEEF/std-log behavior instead of applying
+                    // the normalized-mantissa approximation to exponent-zero
+                    // inputs.
+                    check_f32(&label, &actual, exp, tolerance::F32_FAST);
                 }
                 "float64" => {
                     let a = make_cpu_f64(a_data, shape, false);

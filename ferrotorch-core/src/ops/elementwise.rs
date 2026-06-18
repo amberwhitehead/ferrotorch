@@ -602,16 +602,17 @@ fn vexp_f32(x: f32) -> f32 {
 /// conditioning, then evaluates a degree-7 minimax polynomial for
 /// ln((1+s)/(1-s)) where s = (m-1)/(m+1).
 ///
-/// The polynomial body is only valid for finite positive inputs. For NaN, ±∞,
-/// zero, or negatives, delegate to [`fast_log_f32`] which returns the IEEE-754
-/// correct value via `f32::ln()`. Without this guard, +∞ → ~88.7 (the
-/// polynomial's exponent path treats it as a finite number with biased
-/// exponent 255), and NaN → arbitrary finite garbage (the bit-level mantissa
-/// extraction produces a normal float that the polynomial happily evaluates).
+/// The polynomial body is only valid for finite positive normal inputs. For
+/// NaN, ±∞, zero, negatives, or positive subnormals, delegate to
+/// [`fast_log_f32`] which returns the IEEE-754 correct value via `f32::ln()`.
+/// Without this guard, +∞ → ~88.7 (the polynomial's exponent path treats it as
+/// a finite number with biased exponent 255), NaN → arbitrary finite garbage,
+/// and positive subnormals are interpreted as if they had an implicit normal
+/// mantissa bit, yielding plausible-looking but wrong finite logs.
 #[inline(always)]
 fn vlog_f32(x: f32) -> f32 {
     const LN2: f32 = std::f32::consts::LN_2;
-    if !(x > 0.0 && x.is_finite()) {
+    if !(x.is_finite() && x >= f32::MIN_POSITIVE) {
         return fast_log_f32(x);
     }
 
@@ -1734,10 +1735,12 @@ mod tests {
 
     // --- Regression tests for vlog_f32 edge cases via fast_log_f32 wiring ---
     //
-    // The polynomial body in vlog_f32 produces incorrect values for non-finite
-    // or non-positive inputs (e.g. +inf → ~88.7, NaN → arbitrary finite garbage).
-    // These tests pin the IEEE-754-correct values that the fast_log_f32 fallback
-    // is responsible for delivering — a regression in the guard would fail here.
+    // The polynomial body in vlog_f32 produces incorrect values outside the
+    // finite-positive-normal domain (e.g. +inf → ~88.7, NaN → arbitrary finite
+    // garbage, positive subnormals → finite logs with the wrong exponent).
+    // These tests pin the IEEE-754-correct values that the fast_log_f32
+    // fallback is responsible for delivering — a regression in the guard would
+    // fail here.
 
     #[test]
     fn test_vlog_f32_handles_pos_inf() {
@@ -1761,6 +1764,26 @@ mod tests {
     fn test_vlog_f32_handles_zero_and_negative() {
         assert_eq!(vlog_f32(0.0), f32::NEG_INFINITY);
         assert!(vlog_f32(-1.0).is_nan());
+    }
+
+    #[test]
+    fn test_vlog_f32_handles_subnormals_and_min_positive_boundary() {
+        for x in [f32::from_bits(1), f32::from_bits(0x0001_0000), 1.0e-40_f32] {
+            let actual = vlog_f32(x);
+            let expected = x.ln();
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "vlog_f32({x:e}) must slow-path positive subnormals through f32::ln(), got {actual:e}, expected {expected:e}"
+            );
+        }
+
+        let actual = vlog_f32(f32::MIN_POSITIVE);
+        let expected = f32::MIN_POSITIVE.ln();
+        assert!(
+            (actual - expected).abs() <= 1e-5,
+            "vlog_f32(MIN_POSITIVE) should stay within fast-log tolerance, got {actual:e}, expected {expected:e}"
+        );
     }
 
     // --- Edge-case tests for fast_sigmoid ---
