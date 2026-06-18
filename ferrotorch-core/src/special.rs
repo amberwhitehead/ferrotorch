@@ -1046,6 +1046,17 @@ fn special_unary_backward_cuda<T: Float>(
     output: &Tensor<T>,
     grad_output: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
+    if poly_is_reduced_float::<T>() {
+        return no_grad(|| {
+            let input_f32 = input.to_dtype::<f32>()?;
+            let output_f32 = output.to_dtype::<f32>()?;
+            let grad_output_f32 = grad_output.to_dtype::<f32>()?;
+            let grad_f32 =
+                special_unary_backward_cuda(kind, &input_f32, &output_f32, &grad_output_f32)?;
+            grad_f32.to_dtype::<T>()
+        });
+    }
+
     let factor = match kind {
         SpecialUnaryKind::Erf => {
             let x2 = crate::grad_fns::arithmetic::mul(input, input)?;
@@ -1144,6 +1155,9 @@ fn horner_const_tensor<T: Float>(
 fn erfinv_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     if !input.is_cuda() {
         return Ok(None);
+    }
+    if let Some(output) = cuda_unary_reduced_via_f32(input, "erfinv", erfinv_cuda_composed)? {
+        return Ok(Some(output));
     }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "erfinv" });
@@ -1254,6 +1268,9 @@ fn lgamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<
     if !input.is_cuda() {
         return Ok(None);
     }
+    if let Some(output) = cuda_unary_reduced_via_f32(input, "lgamma", lgamma_cuda_composed)? {
+        return Ok(Some(output));
+    }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "lgamma" });
     }
@@ -1296,6 +1313,9 @@ fn lgamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<
 fn digamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     if !input.is_cuda() {
         return Ok(None);
+    }
+    if let Some(output) = cuda_unary_reduced_via_f32(input, "digamma", digamma_cuda_composed)? {
+        return Ok(Some(output));
     }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "digamma" });
@@ -1433,6 +1453,11 @@ fn multigammaln_cuda_composed<T: Float>(
     if !input.is_cuda() {
         return Ok(None);
     }
+    if let Some(output) = cuda_unary_reduced_via_f32(input, "multigammaln", |input_f32| {
+        multigammaln_cuda_composed(input_f32, p)
+    })? {
+        return Ok(Some(output));
+    }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "multigammaln" });
     }
@@ -1454,6 +1479,11 @@ fn multigammaln_cuda_composed<T: Float>(
 fn gammaln_sign_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     if !input.is_cuda() {
         return Ok(None);
+    }
+    if let Some(output) =
+        cuda_unary_reduced_via_f32(input, "gammaln_sign", gammaln_sign_cuda_composed)?
+    {
+        return Ok(Some(output));
     }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "gammaln_sign" });
@@ -1581,6 +1611,11 @@ fn log_beta_cuda_composed<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
 ) -> FerrotorchResult<Option<Tensor<T>>> {
+    if let Some(output) = cuda_binary_reduced_via_f32(a, b, "log_beta", |a_f32, b_f32| {
+        log_beta_cuda_composed(a_f32, b_f32)
+    })? {
+        return Ok(Some(output));
+    }
     if !cuda_binary_composed_precheck(a, b, "log_beta")? {
         return Ok(None);
     }
@@ -1750,10 +1785,65 @@ fn beta_cuda_composed<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
 ) -> FerrotorchResult<Option<Tensor<T>>> {
+    if let Some(output) = cuda_binary_reduced_via_f32(a, b, "beta", |a_f32, b_f32| {
+        beta_cuda_composed(a_f32, b_f32)
+    })? {
+        return Ok(Some(output));
+    }
     if !cuda_binary_composed_precheck(a, b, "beta")? {
         return Ok(None);
     }
     no_grad(|| Ok(Some(beta_raw_composed(a, b, "beta")?)))
+}
+
+fn cuda_unary_reduced_via_f32<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+    f32_cuda: impl FnOnce(&Tensor<f32>) -> FerrotorchResult<Option<Tensor<f32>>>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() || !poly_is_reduced_float::<T>() {
+        return Ok(None);
+    }
+
+    no_grad(|| {
+        let input_f32 = input.to_dtype::<f32>()?;
+        let output_f32 =
+            f32_cuda(&input_f32)?.ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+        let output = output_f32.to_dtype::<T>()?;
+        Ok(Some(output))
+    })
+}
+
+fn cuda_binary_reduced_via_f32<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: &'static str,
+    f32_cuda: impl FnOnce(&Tensor<f32>, &Tensor<f32>) -> FerrotorchResult<Option<Tensor<f32>>>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !a.is_cuda() && !b.is_cuda() {
+        return Ok(None);
+    }
+    if a.is_cuda() != b.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if !poly_is_reduced_float::<T>() {
+        return Ok(None);
+    }
+
+    no_grad(|| {
+        let a_f32 = a.to_dtype::<f32>()?;
+        let b_f32 = b.to_dtype::<f32>()?;
+        let output_f32 =
+            f32_cuda(&a_f32, &b_f32)?.ok_or(FerrotorchError::NotImplementedOnCuda { op })?;
+        let output = output_f32.to_dtype::<T>()?;
+        Ok(Some(output))
+    })
 }
 
 #[derive(Debug)]
@@ -4439,11 +4529,11 @@ fn gammaln_sign_scalar<T: Float>(x: T) -> T {
 /// Error function: erf(x) = (2/sqrt(pi)) * integral(0, x, exp(-t^2) dt).
 ///
 /// f64 path: SunPro fdlibm piecewise rational approximation, ~1 ulp accuracy
-/// (meets F64_TRANSCENDENTAL = 1e-10). f32/bf16 path: Abramowitz & Stegun
-/// 7.1.26 polynomial, |epsilon| <= 1.5e-7 (meets F32_TRANSCENDENTAL = 1e-5).
+/// (meets F64_TRANSCENDENTAL = 1e-10). f32 and CUDA reduced dtypes use f32
+/// opmath, matching PyTorch's CUDA Half/BFloat16 unary-special contract.
 pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if let Some(output) =
-        special_gpu_simple(input, "erf", |b, h| b.erf_f32(h), |b, h| b.erf_f64(h))?
+        special_gpu_simple_with_reduced(input, "erf", |b, h| b.erf_f32(h), |b, h| b.erf_f64(h))?
     {
         return wrap_special_unary(output, input, SpecialUnaryKind::Erf);
     }
@@ -4455,10 +4545,10 @@ pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// f64 path: SunPro fdlibm `erfc_f64_hi` — computed directly so the
 /// right-tail (large positive x) avoids the catastrophic 1 - erf(x)
-/// cancellation. f32/bf16 path: literal `1 - erf_scalar(x)`.
+/// cancellation. f32 and CUDA reduced dtypes use f32 opmath.
 pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if let Some(output) =
-        special_gpu_simple(input, "erfc", |b, h| b.erfc_f32(h), |b, h| b.erfc_f64(h))?
+        special_gpu_simple_with_reduced(input, "erfc", |b, h| b.erfc_f32(h), |b, h| b.erfc_f64(h))?
     {
         return wrap_special_unary(output, input, SpecialUnaryKind::Erfc);
     }
@@ -5034,6 +5124,21 @@ fn poly_is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+#[inline]
+fn poly_is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
+#[inline]
+fn poly_is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+#[inline]
+fn poly_is_reduced_float<T: Float>() -> bool {
+    poly_is_bf16::<T>() || poly_is_f16::<T>()
+}
+
 /// Per-dtype Hermite order limit, above which the polynomial value is replaced
 /// by `NaN` — a byte-for-relevant mirror of PyTorch's
 /// `getHermitianLimit<T>()` (`aten/src/ATen/native/Math.h:3044-3052`):
@@ -5150,6 +5255,38 @@ fn special_gpu_simple<T: Float>(
     )?))
 }
 
+/// Same as [`special_gpu_simple`], but admits CUDA f16/bf16 by using PyTorch's
+/// reduced-precision contract: widen each element to f32 on-device, evaluate
+/// the f32 resident kernel, then round once back to the original dtype.
+fn special_gpu_simple_with_reduced<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+    f32_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+    f64_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if poly_is_reduced_float::<T>() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        return no_grad(|| {
+            let input_f32 = input.to_dtype::<f32>()?.contiguous()?;
+            let out_handle = f32_call(backend, input_f32.gpu_handle()?)?;
+            let output_f32 = poly_gpu_output::<f32>(out_handle, input_f32.shape().to_vec())?;
+            let output = output_f32.to_dtype::<T>()?;
+            Ok(Some(output))
+        });
+    }
+    special_gpu_simple(input, op, f32_call, f64_call)
+}
+
 /// Run a two-input elementwise special-function kernel (`zeta`) on a pair of
 /// CUDA tensors, dispatching by dtype through the registered [`GpuBackend`].
 /// Returns `Ok(Some(out))` when the GPU path handled it, `Ok(None)` when the
@@ -5243,6 +5380,32 @@ fn special_gpu_binary_broadcast<T: Float>(
         return Err(FerrotorchError::DeviceMismatch {
             expected: x.device(),
             got: y.device(),
+        });
+    }
+    if poly_is_reduced_float::<T>() {
+        return no_grad(|| {
+            let x_f32 = x.to_dtype::<f32>()?;
+            let y_f32 = y.to_dtype::<f32>()?;
+            let out_shape = crate::shape::broadcast_shapes(x_f32.shape(), y_f32.shape())?;
+            let x_expanded = if x_f32.shape() == out_shape.as_slice() {
+                x_f32
+            } else {
+                crate::grad_fns::shape::expand(&x_f32, &out_shape)?
+            };
+            let y_expanded = if y_f32.shape() == out_shape.as_slice() {
+                y_f32
+            } else {
+                crate::grad_fns::shape::expand(&y_f32, &out_shape)?
+            };
+
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let x = x_expanded.contiguous()?;
+            let y = y_expanded.contiguous()?;
+            let out_handle = f32_call(backend, x.gpu_handle()?, y.gpu_handle()?)?;
+            let output_f32 = poly_gpu_output::<f32>(out_handle, out_shape)?;
+            let output = output_f32.to_dtype::<T>()?;
+            Ok(Some(output))
         });
     }
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
