@@ -100,6 +100,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-099: SIMD reduction behavior is hard-coded to one AVX2 host (#1793)
 - CORE-143: MKL dispatch casts matrix dimensions to i32 unchecked (#1837)
 - Canonicalize CUDA `eigh` eigenvector signs to match the CPU stable sign contract (#1844)
 - CORE-176: Chebyshev polynomial families omit torch's closed-form trigonometric branch (#1870)
