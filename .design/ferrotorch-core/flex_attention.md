@@ -50,11 +50,16 @@ backward node.
   by autograd composition.
 - REQ-6: `d == 0` guard — emits `InvalidArgument` "head dimension d
   must be > 0" to avoid division by zero in the `1/sqrt(d)` scaling.
+- REQ-7: Empty-shape parity — local PyTorch 2.11.0+cu130 accepts
+  `B == 0` and `nq == 0`, returning empty outputs of shape
+  `[B,H,nq,dv]`, including when `score_mod` is present. It rejects
+  `H == 0` and `nk == 0`; ferrotorch returns structured
+  `InvalidArgument` errors for those PyTorch-invalid shapes.
 
 ## Acceptance Criteria
 
 - [x] AC-1: `cargo test -p ferrotorch-core --lib flex_attention::tests`
-  passes (7 tests at `flex_attention.rs:266-487`).
+  passes (12 tests in `flex_attention.rs`).
 - [x] AC-2: Basic 4-D attention round-trip — `test_flex_attention_basic`
   at `test_flex_attention_basic in flex_attention.rs` returns shape `[1,1,2,2]`.
 - [x] AC-3: Score-mod additive-constant invariance — adding `+1.0` to
@@ -68,7 +73,14 @@ backward node.
 - [x] AC-6: Hand-computed numerical reference — `test_flex_attention_numerical_value`
   at `test_flex_attention_numerical_value in flex_attention.rs` checks against `[1.6603, 2.6602, 2.3399, 3.3399]` within
   `1e-3`.
-- [ ] AC-7: Parity-sweep `nn.functional.scaled_dot_product_attention`
+- [x] AC-7: Empty-shape parity probes — `score_mod_zero_batch_returns_empty_like_torch`,
+  `score_mod_zero_query_returns_empty_and_visits_existing_batch_heads`,
+  `zero_heads_rejected_like_torch`, and `zero_key_length_rejected_like_torch`
+  pin the live PyTorch 2.11.0+cu130 behavior for these edge cases (#1790).
+  `gpu_score_mod_zero_batch_returns_cuda_empty_like_torch` in
+  `tests/conformance_flex_attention.rs` proves the valid zero-batch
+  score_mod result remains CUDA-resident.
+- [ ] AC-8: Parity-sweep `nn.functional.scaled_dot_product_attention`
   at `--seeds 8` returns ≥1 passed sample — NOT-STARTED, blocked on
   #1532 (runner has no arm; current `0/200 passed (200 skipped)`).
 
@@ -90,10 +102,12 @@ Shape + device validation runs at `:91-141`. The implementation:
 4. Multiply by `1/sqrt(d)` scalar lifted to the input device
    (`flex_attention.rs`).
 5. Reshape to `[B, H, NQ, NK]` (`:188-191`) for score_mod and softmax.
-6. If `score_mod` is provided, walk each (b, h), `narrow → narrow →
-   squeeze → squeeze` to extract `[NQ, NK]`, invoke the callback,
-   validate shape, `unsqueeze → unsqueeze` to lift back to
-   `[1, 1, NQ, NK]`, then `cat` along heads and batches (`:198-241`).
+6. If `score_mod` is provided and `B*H > 0`, walk each (b, h),
+   `narrow → narrow → squeeze → squeeze` to extract `[NQ, NK]`, invoke
+   the callback, validate shape, `unsqueeze → unsqueeze` to lift back to
+   `[1, 1, NQ, NK]`, then `cat` along heads and batches. If `B == 0`,
+   keep the already-shaped score tensor instead of calling `cat([])`,
+   matching PyTorch's empty output behavior.
 7. `softmax` along the last (nk) dim (`:245`).
 8. Reshape weights to `[B*H, NQ, NK]` (`:249-250`).
 9. weights @ V via `bmm_differentiable` → `[B*H, NQ, DV]` (`:253`).
@@ -130,9 +144,12 @@ tests + hand-computed numerical reference.
 
 ## Verification
 
-`cargo test -p ferrotorch-core --lib flex_attention::tests` runs 7
-tests including hand-computed numerical reference and grad
-propagation. Parity-sweep smoke fires `0/200 passed (200 skipped, 0
+`cargo test -p ferrotorch-core --lib flex_attention::tests` runs 12
+tests including hand-computed numerical reference, grad propagation,
+score_mod empty-output parity, and PyTorch-invalid zero-head/key
+rejection. `cargo test -p ferrotorch-core --features gpu --test
+conformance_flex_attention` runs the CPU/GPU fixture suite plus the
+CUDA-residency zero-batch score_mod probe. Parity-sweep smoke fires `0/200 passed (200 skipped, 0
 failed)` — runner gap, not divergence.
 
 ## REQ status table
@@ -145,3 +162,4 @@ failed)` — runner gap, not divergence.
 | REQ-4 | SHIPPED | impl: GPU-aware composition at `flex_attention.rs:167-259` using `bmm_differentiable` + `softmax` + `mul`; non-test consumer: `flex_attention` re-export. The earlier loop-based CPU-only implementation is documented as replaced in the in-line comment at `:146-160` |
 | REQ-5 | SHIPPED | impl: no custom backward node — autograd composition via the differentiable building-blocks; non-test consumer: `flex_attention` re-export. The grad-propagation test at `:440` pins this contract |
 | REQ-6 | SHIPPED | impl: `d == 0` check at `flex_attention.rs:113-117`; non-test consumer: the public `flex_attention` entry |
+| REQ-7 | SHIPPED | impl: `heads == 0` / `n_k == 0` structured guards plus `score_mod` `bh == 0` skip-cat path in `flex_attention.rs`; tests: `score_mod_zero_batch_returns_empty_like_torch`, `score_mod_zero_query_returns_empty_and_visits_existing_batch_heads`, `zero_heads_rejected_like_torch`, `zero_key_length_rejected_like_torch`, `gpu_score_mod_zero_batch_returns_cuda_empty_like_torch` |

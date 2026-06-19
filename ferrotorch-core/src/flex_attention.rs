@@ -32,6 +32,7 @@
 //! | REQ-4 | SHIPPED | GPU-aware composition at `flex_attention.rs:167-259`; consumer: re-export. Parity-sweep runner gap #1532 |
 //! | REQ-5 | SHIPPED | no custom backward — autograd composition; consumer: re-export. Grad-propagation test at `flex_attention.rs:440` |
 //! | REQ-6 | SHIPPED | `d == 0` check at `flex_attention.rs:113-117`; consumer: `flex_attention` entry |
+//! | REQ-7 | SHIPPED | empty-shape parity at `flex_attention.rs`: `B==0`/`nq==0` return PyTorch-shaped empties with `score_mod`; `H==0`/`nk==0` return structured errors like PyTorch rejects |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -71,6 +72,8 @@ use crate::tensor::Tensor;
 /// Returns an error if:
 /// - Input shapes are incompatible.
 /// - `d == 0` (would cause division by zero in scaling).
+/// - `heads == 0` or `n_k == 0`, matching PyTorch's rejected flex-attention
+///   shapes for those cases.
 /// - Any inner operation fails.
 ///
 /// # Backward correctness
@@ -120,10 +123,22 @@ where
     let n_k = k_shape[2];
     let d_v = v_shape[3];
 
+    if heads == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "flex_attention: number of heads must be > 0".into(),
+        });
+    }
+
     // Validate d > 0 to avoid division by zero.
     if d == 0 {
         return Err(FerrotorchError::InvalidArgument {
             message: "flex_attention: head dimension d must be > 0".into(),
+        });
+    }
+
+    if n_k == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "flex_attention: key sequence length must be > 0".into(),
         });
     }
 
@@ -207,46 +222,50 @@ where
     // reassemble via cat — all on the input's device, since narrow and
     // cat are device-aware.
     let scores_after_mod = if let Some(ref sm) = score_mod {
-        // Extract per-(b,h) sub-tensors as [n_q, n_k] views, run user code,
-        // and reassemble. The narrow + squeeze are zero-copy stride views;
-        // cat is GPU-aware. The only potential CPU round-trip is in the
-        // user's score_mod callback itself (out of our control).
-        let mut per_bh: Vec<Tensor<T>> = Vec::with_capacity(bh);
-        for b in 0..batch {
-            for h in 0..heads {
-                // [B, H, n_q, n_k] -> narrow b -> [1, H, n_q, n_k]
-                //                  -> narrow h -> [1, 1, n_q, n_k]
-                //                  -> squeeze 0, squeeze 0 -> [n_q, n_k]
-                let bh_view = scores4
-                    .narrow(0, b, 1)?
-                    .narrow(1, h, 1)?
-                    .squeeze_t(0)?
-                    .squeeze_t(0)?;
-                let modified = sm(&bh_view, b, h)?;
-                if modified.shape() != [n_q, n_k] {
-                    return Err(FerrotorchError::ShapeMismatch {
-                        message: format!(
-                            "flex_attention: score_mod returned shape {:?}, expected [{}, {}]",
-                            modified.shape(),
-                            n_q,
-                            n_k
-                        ),
-                    });
+        if bh == 0 {
+            scores4
+        } else {
+            // Extract per-(b,h) sub-tensors as [n_q, n_k] views, run user code,
+            // and reassemble. The narrow + squeeze are zero-copy stride views;
+            // cat is GPU-aware. The only potential CPU round-trip is in the
+            // user's score_mod callback itself (out of our control).
+            let mut per_bh: Vec<Tensor<T>> = Vec::with_capacity(bh);
+            for b in 0..batch {
+                for h in 0..heads {
+                    // [B, H, n_q, n_k] -> narrow b -> [1, H, n_q, n_k]
+                    //                  -> narrow h -> [1, 1, n_q, n_k]
+                    //                  -> squeeze 0, squeeze 0 -> [n_q, n_k]
+                    let bh_view = scores4
+                        .narrow(0, b, 1)?
+                        .narrow(1, h, 1)?
+                        .squeeze_t(0)?
+                        .squeeze_t(0)?;
+                    let modified = sm(&bh_view, b, h)?;
+                    if modified.shape() != [n_q, n_k] {
+                        return Err(FerrotorchError::ShapeMismatch {
+                            message: format!(
+                                "flex_attention: score_mod returned shape {:?}, expected [{}, {}]",
+                                modified.shape(),
+                                n_q,
+                                n_k
+                            ),
+                        });
+                    }
+                    // Lift back to [1, 1, n_q, n_k] so we can cat along dims 0/1.
+                    let lifted = modified.unsqueeze_t(0)?.unsqueeze_t(0)?;
+                    per_bh.push(lifted);
                 }
-                // Lift back to [1, 1, n_q, n_k] so we can cat along dims 0/1.
-                let lifted = modified.unsqueeze_t(0)?.unsqueeze_t(0)?;
-                per_bh.push(lifted);
             }
+            // Concatenate first along the heads axis (dim 1) for each batch,
+            // then along the batch axis (dim 0).
+            let mut head_groups: Vec<Tensor<T>> = Vec::with_capacity(batch);
+            for b in 0..batch {
+                let group: Vec<Tensor<T>> = per_bh[b * heads..(b + 1) * heads].to_vec();
+                let cat_h = crate::grad_fns::shape::cat(&group, 1)?;
+                head_groups.push(cat_h);
+            }
+            crate::grad_fns::shape::cat(&head_groups, 0)?
         }
-        // Concatenate first along the heads axis (dim 1) for each batch,
-        // then along the batch axis (dim 0).
-        let mut head_groups: Vec<Tensor<T>> = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let group: Vec<Tensor<T>> = per_bh[b * heads..(b + 1) * heads].to_vec();
-            let cat_h = crate::grad_fns::shape::cat(&group, 1)?;
-            head_groups.push(cat_h);
-        }
-        crate::grad_fns::shape::cat(&head_groups, 0)?
     } else {
         scores4
     };
@@ -445,6 +464,118 @@ mod tests {
                 "softmax-invariant additive bias should not change output[{i}]: base={b}, mod={m}"
             );
         }
+    }
+
+    #[test]
+    fn score_mod_zero_batch_returns_empty_like_torch() {
+        // Live PyTorch 2.11.0+cu130:
+        // flex_attention(empty([0, 2, 3, 4]), empty([0, 2, 5, 4]),
+        //                empty([0, 2, 5, 6]), score_mod=identity)
+        // returns shape [0, 2, 3, 6] and does not invoke any per-(b,h) body.
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let q = make_tensor(vec![], vec![0, 2, 3, 4]);
+        let k = make_tensor(vec![], vec![0, 2, 5, 4]);
+        let v = make_tensor(vec![], vec![0, 2, 5, 6]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = Arc::clone(&calls);
+
+        let out = flex_attention(
+            &q,
+            &k,
+            &v,
+            Some(move |scores: &Tensor<f32>, _b: usize, _h: usize| {
+                calls_for_closure.fetch_add(1, Ordering::Relaxed);
+                Ok(scores.clone())
+            }),
+        )
+        .expect("zero-batch score_mod flex_attention should return an empty tensor");
+
+        assert_eq!(out.shape(), &[0, 2, 3, 6]);
+        assert_eq!(out.numel(), 0);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "score_mod must not run when there are no batch/head pairs"
+        );
+    }
+
+    #[test]
+    fn score_mod_zero_query_returns_empty_and_visits_existing_batch_heads() {
+        // Live PyTorch 2.11.0+cu130 returns [1, 2, 0, 6] for this shape.
+        // Ferrotorch's score_mod API is per-(batch, head), so the callback
+        // should still run for the two existing heads with a [0, 5] score view.
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let q = make_tensor(vec![], vec![1, 2, 0, 4]);
+        let k = make_tensor(vec![0.0; 2 * 5 * 4], vec![1, 2, 5, 4]);
+        let v = make_tensor(vec![0.0; 2 * 5 * 6], vec![1, 2, 5, 6]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = Arc::clone(&calls);
+
+        let out = flex_attention(
+            &q,
+            &k,
+            &v,
+            Some(move |scores: &Tensor<f32>, b: usize, h: usize| {
+                assert_eq!(b, 0);
+                assert!(h < 2);
+                assert_eq!(scores.shape(), &[0, 5]);
+                calls_for_closure.fetch_add(1, Ordering::Relaxed);
+                Ok(scores.clone())
+            }),
+        )
+        .expect("zero-query score_mod flex_attention should return an empty tensor");
+
+        assert_eq!(out.shape(), &[1, 2, 0, 6]);
+        assert_eq!(out.numel(), 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn zero_heads_rejected_like_torch() {
+        // Live PyTorch 2.11.0+cu130 rejects zero heads with ZeroDivisionError
+        // in the head-ratio calculation. Ferrotorch returns a structured error
+        // instead of panicking, but must not silently accept this shape.
+        let q = make_tensor(vec![], vec![2, 0, 3, 4]);
+        let k = make_tensor(vec![], vec![2, 0, 5, 4]);
+        let v = make_tensor(vec![], vec![2, 0, 5, 6]);
+        let result = flex_attention::<
+            f32,
+            fn(&Tensor<f32>, usize, usize) -> FerrotorchResult<Tensor<f32>>,
+        >(&q, &k, &v, None);
+
+        let err = result.expect_err("zero-head flex_attention should be rejected");
+        assert!(
+            format!("{err}").contains("heads must be > 0"),
+            "unexpected zero-head error: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_key_length_rejected_like_torch() {
+        // Live PyTorch 2.11.0+cu130 rejects n_k == 0 with IndexError from a
+        // max reduction over the empty score dimension. Ferrotorch reports the
+        // invalid shape up front.
+        let q = make_tensor(vec![0.0; 2 * 3 * 4], vec![1, 2, 3, 4]);
+        let k = make_tensor(vec![], vec![1, 2, 0, 4]);
+        let v = make_tensor(vec![], vec![1, 2, 0, 6]);
+        let result = flex_attention::<
+            f32,
+            fn(&Tensor<f32>, usize, usize) -> FerrotorchResult<Tensor<f32>>,
+        >(&q, &k, &v, None);
+
+        let err = result.expect_err("zero-key flex_attention should be rejected");
+        assert!(
+            format!("{err}").contains("key sequence length must be > 0"),
+            "unexpected zero-key error: {err}"
+        );
     }
 
     #[test]

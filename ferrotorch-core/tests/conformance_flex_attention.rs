@@ -1000,7 +1000,10 @@ fn fixture_file_shape_invariants() {
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
-    use std::sync::Once;
+    use std::sync::{
+        Arc, Once,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     static GPU_INIT: Once = Once::new();
 
@@ -1034,5 +1037,62 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_backward_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_score_mod_zero_batch_returns_cuda_empty_like_torch() {
+        // Live PyTorch 2.11.0+cu130 accepts B == 0 for flex_attention with a
+        // pure score_mod and returns [0, H, Lq, Ev] without invoking the
+        // callback. This guards the ferrotorch CUDA path against replacing the
+        // result with a host-side empty tensor.
+        ensure_cuda_backend();
+
+        let q = Tensor::from_storage(
+            TensorStorage::on_device(Vec::<f32>::new(), Device::Cuda(0))
+                .expect("upload zero-batch query"),
+            vec![0, 2, 3, 4],
+            false,
+        )
+        .expect("CUDA zero-batch query tensor");
+        let k = Tensor::from_storage(
+            TensorStorage::on_device(Vec::<f32>::new(), Device::Cuda(0))
+                .expect("upload zero-batch key"),
+            vec![0, 2, 5, 4],
+            false,
+        )
+        .expect("CUDA zero-batch key tensor");
+        let v = Tensor::from_storage(
+            TensorStorage::on_device(Vec::<f32>::new(), Device::Cuda(0))
+                .expect("upload zero-batch value"),
+            vec![0, 2, 5, 6],
+            false,
+        )
+        .expect("CUDA zero-batch value tensor");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = Arc::clone(&calls);
+
+        let out = flex_attention::flex_attention(
+            &q,
+            &k,
+            &v,
+            Some(move |scores: &Tensor<f32>, _b: usize, _h: usize| {
+                calls_for_closure.fetch_add(1, Ordering::Relaxed);
+                Ok(scores.clone())
+            }),
+        )
+        .expect("CUDA zero-batch score_mod flex_attention should return an empty tensor");
+
+        assert_eq!(out.shape(), &[0, 2, 3, 6]);
+        assert_eq!(out.numel(), 0);
+        assert_eq!(
+            out.device(),
+            Device::Cuda(0),
+            "zero-batch score_mod output must remain CUDA-resident"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "score_mod must not run when there are no batch/head pairs"
+        );
     }
 }
