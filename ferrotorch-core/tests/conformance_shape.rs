@@ -2268,6 +2268,115 @@ fn cpu_where_cond() {
 }
 
 #[test]
+fn cpu_gather_scalar_index_and_scalar_input_match_torch_backward() {
+    // PyTorch uses ensure_nonempty_dim/size for gather checks:
+    //   torch.gather(torch.tensor([5.], requires_grad=True), 0, tensor(0))
+    //   -> scalar 5, backward grad [1].
+    let vector = make_cpu_f32(&[5.0], &[1], true);
+    let out = gather(&vector, 0, &[0], &[]).expect("1-D gather with scalar index");
+    assert_eq!(out.shape(), &[] as &[usize]);
+    check_f32(
+        "gather scalar-index cpu fwd",
+        &read_back_f32(&out),
+        &[5.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.backward().expect("gather scalar-index backward");
+    let grad = vector.grad().unwrap().expect("vector grad");
+    assert_eq!(grad.shape(), &[1]);
+    check_f32(
+        "gather scalar-index cpu grad",
+        &read_back_f32(&grad),
+        &[1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    // Scalar input can be gathered repeatedly and the VJP accumulates into
+    // the scalar, exactly like zeros_like(self).scatter_add_(dim, index, grad).
+    let scalar = make_cpu_f32(&[5.0], &[], true);
+    let out = gather(&scalar, 0, &[0, 0], &[2]).expect("scalar gather repeated index");
+    assert_eq!(out.shape(), &[2]);
+    check_f32(
+        "gather scalar-input cpu fwd",
+        &read_back_f32(&out),
+        &[5.0, 5.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("scalar gather sum")
+        .backward()
+        .expect("scalar gather backward");
+    let grad = scalar.grad().unwrap().expect("scalar grad");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    check_f32(
+        "gather scalar-input cpu grad",
+        &read_back_f32(&grad),
+        &[2.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
+fn cpu_gather_backward_public_struct_validates_and_accepts_strided_grad() {
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+    let grad_fn = GatherBackward {
+        input: input.clone(),
+        dim: 1,
+        index: vec![0, 1, 1, 0],
+        index_cuda: None,
+        index_shape: vec![2, 2],
+    };
+
+    let bad_grad = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false);
+    let err = grad_fn
+        .backward(&bad_grad)
+        .expect_err("same-numel wrong-shape grad must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_dim_fn = GatherBackward {
+        input: input.clone(),
+        dim: 2,
+        index: vec![0, 1, 1, 0],
+        index_cuda: None,
+        index_shape: vec![2, 2],
+    };
+    let good_grad = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    let err = bad_dim_fn
+        .backward(&good_grad)
+        .expect_err("out-of-range saved dim must be rejected");
+    assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+
+    let bad_index_fn = GatherBackward {
+        input: input.clone(),
+        dim: 1,
+        index: vec![0, 2, 1, 0],
+        index_cuda: None,
+        index_shape: vec![2, 2],
+    };
+    let err = bad_index_fn
+        .backward(&good_grad)
+        .expect_err("out-of-range saved index must be rejected");
+    assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+
+    // Non-contiguous grad_output view, logical values [[1,2],[3,4]].
+    let grad_base = make_cpu_f32(&[1.0, 2.0, 99.0, 3.0, 4.0, 99.0], &[6], false);
+    let grad_view = grad_base
+        .as_strided(&[2, 2], &[3, 1], Some(0))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided grad_output is valid");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert_eq!(grad.shape(), &[2, 2]);
+    check_f32(
+        "GatherBackward strided cpu grad",
+        &read_back_f32(grad),
+        &[1.0, 2.0, 4.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
 fn cpu_where_cond_bt_broadcasts_and_reduces_like_torch() {
     // PyTorch reference:
     //   cond = torch.tensor([[True], [False]])
@@ -5013,6 +5122,106 @@ mod gpu {
             "where_cond cuda",
             &read_back_f32(&r),
             &[1.0, 20.0, 3.0, 40.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_gather_scalar_index_and_scalar_input_match_torch_backward() {
+        ensure_cuda_backend();
+        let vector = upload_f32(make_cpu_f32(&[5.0], &[1], true), Device::Cuda(0));
+        let out = gather(&vector, 0, &[0], &[]).expect("CUDA 1-D gather with scalar index");
+        assert!(out.is_cuda(), "scalar-index gather output device");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        check_f32(
+            "gather scalar-index cuda fwd",
+            &read_back_f32(&out),
+            &[5.0],
+            tolerance::F32_BITEXACT,
+        );
+        out.backward().expect("CUDA scalar-index gather backward");
+        let grad = vector.grad().unwrap().expect("vector grad");
+        assert!(grad.is_cuda(), "scalar-index gather grad device");
+        assert_eq!(grad.shape(), &[1]);
+        check_f32(
+            "gather scalar-index cuda grad",
+            &read_back_f32(&grad),
+            &[1.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let scalar = upload_f32(make_cpu_f32(&[5.0], &[], true), Device::Cuda(0));
+        let out = gather(&scalar, 0, &[0, 0], &[2]).expect("CUDA scalar gather repeated index");
+        assert!(out.is_cuda(), "scalar gather output device");
+        assert_eq!(out.shape(), &[2]);
+        check_f32(
+            "gather scalar-input cuda fwd",
+            &read_back_f32(&out),
+            &[5.0, 5.0],
+            tolerance::F32_BITEXACT,
+        );
+        out.sum_all()
+            .expect("CUDA scalar gather sum")
+            .backward()
+            .expect("CUDA scalar gather backward");
+        let grad = scalar.grad().unwrap().expect("scalar grad");
+        assert!(grad.is_cuda(), "scalar gather grad device");
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        check_f32(
+            "gather scalar-input cuda grad",
+            &read_back_f32(&grad),
+            &[2.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_gather_backward_public_struct_rejects_bad_grad_shape_or_device() {
+        ensure_cuda_backend();
+        let input = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true),
+            Device::Cuda(0),
+        );
+        let grad_fn = GatherBackward {
+            input,
+            dim: 1,
+            index: vec![0, 1, 1, 0],
+            index_cuda: None,
+            index_shape: vec![2, 2],
+        };
+
+        let bad_shape_grad = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false)
+            .to(Device::Cuda(0))
+            .expect("upload bad-shape grad");
+        let err = grad_fn
+            .backward(&bad_shape_grad)
+            .expect_err("CUDA same-numel wrong-shape grad must be rejected");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+        let cpu_grad = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let err = grad_fn
+            .backward(&cpu_grad)
+            .expect_err("CPU grad for CUDA saved input must be rejected");
+        assert!(matches!(err, FerrotorchError::DeviceMismatch { .. }));
+
+        // Non-contiguous CUDA grad_output view, logical values [[1,2],[3,4]].
+        let grad_base = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 99.0, 3.0, 4.0, 99.0], &[6], false),
+            Device::Cuda(0),
+        );
+        let grad_view = grad_base
+            .as_strided(&[2, 2], &[3, 1], Some(0))
+            .expect("CUDA strided grad_output");
+        let grads = grad_fn
+            .backward(&grad_view)
+            .expect("CUDA strided grad_output is valid");
+        let grad = grads[0].as_ref().expect("input grad");
+        assert!(grad.is_cuda(), "GatherBackward grad must stay CUDA");
+        assert_eq!(grad.shape(), &[2, 2]);
+        check_f32(
+            "GatherBackward strided cuda grad",
+            &read_back_f32(grad),
+            &[1.0, 2.0, 4.0, 3.0],
             tolerance::F32_BITEXACT,
         );
     }

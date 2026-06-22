@@ -616,6 +616,76 @@ pub struct GatherBackward<T: Float> {
     pub index_shape: Vec<usize>,
 }
 
+#[inline]
+fn gather_effective_shape(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        vec![1]
+    } else {
+        shape.to_vec()
+    }
+}
+
+fn validate_gather_backward_layout(
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> FerrotorchResult<()> {
+    if dim >= input_shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "GatherBackward: dim {dim} out of range for effective input ndim {}",
+                input_shape.len()
+            ),
+        });
+    }
+    if index_shape.len() != input_shape.len() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "GatherBackward: index ndim {} does not match effective input ndim {}",
+                index_shape.len(),
+                input_shape.len()
+            ),
+        });
+    }
+    for (axis, (&index_dim, &input_dim)) in index_shape.iter().zip(input_shape).enumerate() {
+        if axis != dim && index_dim > input_dim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "GatherBackward: index dim {axis} size {index_dim} exceeds input size {input_dim}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gather_backward_host_index(
+    index: &[usize],
+    index_numel: usize,
+    dim: usize,
+    dim_size: usize,
+) -> FerrotorchResult<()> {
+    if index.len() != index_numel {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "GatherBackward: host saved index length {} != saved index shape numel {}",
+                index.len(),
+                index_numel
+            ),
+        });
+    }
+    for &idx in index {
+        if idx >= dim_size {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: idx,
+                axis: dim,
+                size: dim_size,
+            });
+        }
+    }
+    Ok(())
+}
+
 impl<T: Float> GradFn<T> for GatherBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         if !is_grad_enabled() {
@@ -624,15 +694,30 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
 
         let input_shape = self.input.shape();
         let input_numel: usize = crate::shape::numel(input_shape);
+        let effective_input_shape = gather_effective_shape(input_shape);
+        let effective_index_shape = gather_effective_shape(&self.index_shape);
         let index_numel: usize = crate::shape::numel(&self.index_shape);
-        if grad_output.numel() != index_numel {
+        if grad_output.shape() != self.index_shape.as_slice() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "GatherBackward: grad_output numel {} != saved index numel {}",
-                    grad_output.numel(),
-                    index_numel
+                    "GatherBackward: grad_output shape {:?} does not match saved index shape {:?}",
+                    grad_output.shape(),
+                    self.index_shape
                 ),
             });
+        }
+        if grad_output.device() != self.input.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.input.device(),
+                got: grad_output.device(),
+            });
+        }
+        if index_numel != 0 {
+            validate_gather_backward_layout(
+                &effective_input_shape,
+                &effective_index_shape,
+                self.dim,
+            )?;
         }
         if index_numel == 0 {
             let grad_tensor = if grad_output.is_cuda() {
@@ -682,53 +767,57 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                         got: index_cuda.device(),
                     });
                 }
+                backend.check_int_indices_in_bounds(
+                    index_cuda.gpu_handle()?,
+                    self.dim,
+                    effective_input_shape[self.dim],
+                    "GatherBackward",
+                )?;
                 index_cuda.gpu_handle()?
             } else {
-                if self.index.len() != index_numel {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "GatherBackward: host saved index length {} != saved index shape numel {}",
-                            self.index.len(),
-                            index_numel
-                        ),
-                    });
-                }
+                validate_gather_backward_host_index(
+                    &self.index,
+                    index_numel,
+                    self.dim,
+                    effective_input_shape[self.dim],
+                )?;
                 uploaded_idx = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
                 &uploaded_idx
             };
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
+            let grad_output = grad_output.contiguous()?;
             let go_handle = grad_output.gpu_handle()?;
             let result_handle = match dt {
                 DType::F32 => backend.scatter_add_nd_f32(
                     &zeros,
                     idx_handle,
                     go_handle,
-                    input_shape,
-                    &self.index_shape,
+                    &effective_input_shape,
+                    &effective_index_shape,
                     self.dim,
                 )?,
                 DType::F64 => backend.scatter_add_nd_f64(
                     &zeros,
                     idx_handle,
                     go_handle,
-                    input_shape,
-                    &self.index_shape,
+                    &effective_input_shape,
+                    &effective_index_shape,
                     self.dim,
                 )?,
                 DType::F16 => backend.scatter_add_nd_f16(
                     &zeros,
                     idx_handle,
                     go_handle,
-                    input_shape,
-                    &self.index_shape,
+                    &effective_input_shape,
+                    &effective_index_shape,
                     self.dim,
                 )?,
                 DType::BF16 => backend.scatter_add_nd_bf16(
                     &zeros,
                     idx_handle,
                     go_handle,
-                    input_shape,
-                    &self.index_shape,
+                    &effective_input_shape,
+                    &effective_index_shape,
                     self.dim,
                 )?,
                 _ => {
@@ -746,16 +835,13 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
         }
 
         let go_data = grad_output.data_vec()?;
-        let ndim = input_shape.len();
-        if self.index.len() != index_numel {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "GatherBackward: CPU backward requires a host saved index of length {}, got {}",
-                    index_numel,
-                    self.index.len()
-                ),
-            });
-        }
+        let ndim = effective_input_shape.len();
+        validate_gather_backward_host_index(
+            &self.index,
+            index_numel,
+            self.dim,
+            effective_input_shape[self.dim],
+        )?;
 
         let mut grad_input = vec![<T as num_traits::Zero>::zero(); input_numel];
 
@@ -765,11 +851,11 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
             let idx_val = self.index[i];
             let mut dst_coords = coords.clone();
             dst_coords[self.dim] = idx_val;
-            let dst_flat = flat_index(&dst_coords, input_shape);
+            let dst_flat = flat_index(&dst_coords, &effective_input_shape);
             grad_input[dst_flat] += go_val;
 
             if i + 1 < index_numel {
-                increment_coords(&mut coords, &self.index_shape);
+                increment_coords(&mut coords, &effective_index_shape);
             }
         }
 

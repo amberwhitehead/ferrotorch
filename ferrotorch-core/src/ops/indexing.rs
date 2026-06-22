@@ -318,7 +318,7 @@ pub fn gather<T: Float>(
         input.shape().to_vec()
     };
     let effective_ndim = effective_input_shape.len();
-    let effective_index_shape: Vec<usize> = if ndim == 0 && index_shape.is_empty() {
+    let effective_index_shape: Vec<usize> = if index_shape.is_empty() {
         vec![1]
     } else {
         index_shape.to_vec()
