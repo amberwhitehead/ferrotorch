@@ -1216,6 +1216,35 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
             return Ok(vec![None, None]);
         }
 
+        let output_shape = self.condition.shape().to_vec();
+        if self.x.shape() != output_shape.as_slice() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "WhereCondBackward: x shape {:?} does not match condition shape {:?}",
+                    self.x.shape(),
+                    output_shape
+                ),
+            });
+        }
+        if self.y.shape() != output_shape.as_slice() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "WhereCondBackward: y shape {:?} does not match condition shape {:?}",
+                    self.y.shape(),
+                    output_shape
+                ),
+            });
+        }
+        if grad_output.shape() != output_shape.as_slice() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "WhereCondBackward: grad_output shape {:?} does not match condition shape {:?}",
+                    grad_output.shape(),
+                    output_shape
+                ),
+            });
+        }
+
         // GPU-resident path (crosslink #1187 Phase 3d):
         //   grad_x[i] = cond[i] ? grad[i] : 0  → zero grad where cond is FALSE
         //   grad_y[i] = cond[i] ? 0 : grad[i]  → zero grad where cond is TRUE
@@ -1225,15 +1254,36 @@ impl<T: Float> GradFn<T> for WhereCondBackward<T> {
         // uses `!cond` (the resident `bool_not`). NO float-mask upload, NO host
         // crossing. `masked_fill_dt` is dtype-generic (f32/f64/bf16/f16) and
         // allocates exact-length output buffers (PyTorch parity: VJP of `where`).
-        if grad_output.is_cuda() && self.condition.is_cuda() {
-            if grad_output.device() != self.condition.device() {
+        if grad_output.is_cuda() || self.condition.is_cuda() || self.x.is_cuda() || self.y.is_cuda()
+        {
+            let expected = self.condition.device();
+            if self.x.device() != expected {
                 return Err(FerrotorchError::DeviceMismatch {
-                    expected: grad_output.device(),
-                    got: self.condition.device(),
+                    expected,
+                    got: self.x.device(),
+                });
+            }
+            if self.y.device() != expected {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected,
+                    got: self.y.device(),
+                });
+            }
+            if grad_output.device() != expected {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected,
+                    got: grad_output.device(),
+                });
+            }
+            if !expected.is_cuda() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected,
+                    got: grad_output.device(),
                 });
             }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let cond_h = self.condition.gpu_handle()?;
+            let grad_output = grad_output.contiguous()?;
             let grad_h = grad_output.gpu_handle()?;
 
             let grad_x = if self.x.requires_grad() {

@@ -69,6 +69,7 @@ use ferrotorch_core::grad_fns::indexing::{
     GatherBackward, IndexSelectBackward, IndexSelectDimBackward, MaskedFillBackward,
     MaskedSelectBackward, ScatterAddBackward, ScatterBackward, WhereCondBackward, index_select_1d,
     index_select_1d_it, index_select_dim, masked_fill, masked_fill_bt, masked_select_bcast,
+    where_cond_bcast,
 };
 use ferrotorch_core::grad_fns::shape::{
     CatBackward, ExpandBackward, FlattenBackward, ReshapeBackward, SplitBackward, SqueezeBackward,
@@ -76,7 +77,7 @@ use ferrotorch_core::grad_fns::shape::{
     unsqueeze,
 };
 use ferrotorch_core::ops::indexing::{
-    gather, masked_select, scatter, scatter_add, scatter_value, where_cond,
+    gather, masked_select, scatter, scatter_add, scatter_value, where_cond, where_cond_bt,
 };
 use ferrotorch_core::ops::search::{
     MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
@@ -2264,6 +2265,115 @@ fn cpu_where_cond() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn cpu_where_cond_bt_broadcasts_and_reduces_like_torch() {
+    // PyTorch reference:
+    //   cond = torch.tensor([[True], [False]])
+    //   x = torch.tensor([[1., 2., 3.]], requires_grad=True)
+    //   y = torch.tensor([[10.], [20.]], requires_grad=True)
+    //   torch.where(cond, x, y) -> [[1,2,3],[20,20,20]]
+    //   out.sum().backward(); x.grad -> [[1,1,1]], y.grad -> [[0],[3]]
+    let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1]).expect("cond");
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], true);
+    let y = make_cpu_f32(&[10.0, 20.0], &[2, 1], true);
+
+    let out = where_cond_bcast(&cond, &x, &y).expect("where_cond_bcast");
+    assert_eq!(out.shape(), &[2, 3]);
+    check_f32(
+        "where_cond_bcast cpu fwd",
+        &read_back_f32(&out),
+        &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    out.sum_all()
+        .expect("where_cond_bcast sum")
+        .backward()
+        .expect("where_cond_bcast backward");
+    let x_grad = x.grad().unwrap().expect("where x grad");
+    let y_grad = y.grad().unwrap().expect("where y grad");
+    assert_eq!(x_grad.shape(), &[1, 3]);
+    assert_eq!(y_grad.shape(), &[2, 1]);
+    check_f32(
+        "where_cond_bcast cpu x grad",
+        &read_back_f32(&x_grad),
+        &[1.0, 1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "where_cond_bcast cpu y grad",
+        &read_back_f32(&y_grad),
+        &[0.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let no_grad_x = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false);
+    let no_grad_y = make_cpu_f32(&[10.0, 20.0], &[2, 1], false);
+    let out = where_cond_bt(&cond, &no_grad_x, &no_grad_y).expect("where_cond_bt");
+    assert_eq!(out.shape(), &[2, 3]);
+    check_f32(
+        "where_cond_bt cpu fwd",
+        &read_back_f32(&out),
+        &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
+fn cpu_where_cond_backward_public_struct_validates_and_accepts_strided_grad() {
+    let x = make_cpu_f32(&[1.0, 2.0], &[2], true);
+    let y = make_cpu_f32(&[10.0, 20.0], &[2], true);
+    let condition = BoolTensor::from_vec(vec![true, false], vec![2]).expect("condition");
+    let grad_fn = WhereCondBackward {
+        x: x.clone(),
+        y: y.clone(),
+        condition: condition.clone(),
+    };
+
+    let bad_grad = make_cpu_f32(&[1.0], &[1], false);
+    let err = grad_fn
+        .backward(&bad_grad)
+        .expect_err("wrong grad shape must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_condition_fn = WhereCondBackward {
+        x: x.clone(),
+        y: y.clone(),
+        condition: BoolTensor::from_vec(vec![true, false, true], vec![3])
+            .expect("wrong-size condition"),
+    };
+    let good_grad = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
+    let err = bad_condition_fn
+        .backward(&good_grad)
+        .expect_err("wrong saved condition shape must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    // Non-contiguous grad_output view, logical values [1, 2]. PyTorch's
+    // autograd accepts non-contiguous incoming grads; the backward must read
+    // logical order.
+    let grad_base = make_cpu_f32(&[9.0, 1.0, 8.0, 2.0], &[4], false);
+    let grad_view = grad_base
+        .as_strided(&[2], &[2], Some(1))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided grad_output is valid");
+    let gx = grads[0].as_ref().expect("x grad");
+    let gy = grads[1].as_ref().expect("y grad");
+    check_f32(
+        "where_cond backward strided x grad",
+        &read_back_f32(gx),
+        &[1.0, 0.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "where_cond backward strided y grad",
+        &read_back_f32(gy),
+        &[0.0, 2.0],
+        tolerance::F32_BITEXACT,
+    );
 }
 
 fn run_index_select_for_device(device_label: &str, device: Device) {
@@ -4512,6 +4622,88 @@ mod gpu {
         let err = grad_fn
             .backward(&bad_grad)
             .expect_err("CUDA compact grad length must be validated");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn gpu_where_cond_bt_broadcasts_and_reduces_like_torch() {
+        ensure_cuda_backend();
+        let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1])
+            .expect("cond")
+            .to(Device::Cuda(0))
+            .expect("upload cond");
+        let x = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], true),
+            Device::Cuda(0),
+        );
+        let y = upload_f32(make_cpu_f32(&[10.0, 20.0], &[2, 1], true), Device::Cuda(0));
+
+        let out = where_cond_bcast(&cond, &x, &y).expect("CUDA where_cond_bcast");
+        assert!(out.is_cuda(), "where_cond_bcast output must stay CUDA");
+        assert_eq!(out.shape(), &[2, 3]);
+        check_f32(
+            "where_cond_bcast cuda fwd",
+            &read_back_f32(&out),
+            &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        out.sum_all()
+            .expect("CUDA where_cond_bcast sum")
+            .backward()
+            .expect("CUDA where_cond_bcast backward");
+        let x_grad = x.grad().unwrap().expect("CUDA where x grad");
+        let y_grad = y.grad().unwrap().expect("CUDA where y grad");
+        assert!(x_grad.is_cuda(), "where x grad must stay CUDA");
+        assert!(y_grad.is_cuda(), "where y grad must stay CUDA");
+        assert_eq!(x_grad.shape(), &[1, 3]);
+        assert_eq!(y_grad.shape(), &[2, 1]);
+        check_f32(
+            "where_cond_bcast cuda x grad",
+            &read_back_f32(&x_grad),
+            &[1.0, 1.0, 1.0],
+            tolerance::F32_BITEXACT,
+        );
+        check_f32(
+            "where_cond_bcast cuda y grad",
+            &read_back_f32(&y_grad),
+            &[0.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let no_grad_x = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false)
+            .to(Device::Cuda(0))
+            .expect("upload x");
+        let no_grad_y = make_cpu_f32(&[10.0, 20.0], &[2, 1], false)
+            .to(Device::Cuda(0))
+            .expect("upload y");
+        let out = where_cond_bt(&cond, &no_grad_x, &no_grad_y).expect("CUDA where_cond_bt");
+        assert!(out.is_cuda(), "where_cond_bt output must stay CUDA");
+        check_f32(
+            "where_cond_bt cuda fwd",
+            &read_back_f32(&out),
+            &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_where_cond_backward_public_struct_rejects_bad_grad_shape() {
+        ensure_cuda_backend();
+        let x = upload_f32(make_cpu_f32(&[1.0, 2.0], &[2], true), Device::Cuda(0));
+        let y = upload_f32(make_cpu_f32(&[10.0, 20.0], &[2], true), Device::Cuda(0));
+        let condition = BoolTensor::from_vec(vec![true, false], vec![2])
+            .expect("condition")
+            .to(Device::Cuda(0))
+            .expect("upload condition");
+        let grad_fn = WhereCondBackward { x, y, condition };
+        let bad_grad = make_cpu_f32(&[1.0], &[1], false)
+            .to(Device::Cuda(0))
+            .expect("upload bad grad");
+
+        let err = grad_fn
+            .backward(&bad_grad)
+            .expect_err("CUDA wrong grad shape must be rejected");
         assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
     }
 

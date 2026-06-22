@@ -14184,6 +14184,12 @@ impl GpuBackend for CudaBackendImpl {
                 message: format!("masked_fill: input numel {n} != mask numel {mask_n}"),
             });
         }
+        if input.device_ordinal() != mask.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(input.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(mask.device_ordinal()),
+            });
+        }
         let dev = self.device(input.device_ordinal())?;
         let ord = input.device_ordinal();
         let mb = Self::unwrap_buffer_bool(mask)?.inner();
@@ -14272,6 +14278,18 @@ impl GpuBackend for CudaBackendImpl {
                     x.len(),
                     y.len()
                 ),
+            });
+        }
+        if x.device_ordinal() != y.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(x.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(y.device_ordinal()),
+            });
+        }
+        if x.device_ordinal() != cond.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(x.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(cond.device_ordinal()),
             });
         }
         let dev = self.device(x.device_ordinal())?;

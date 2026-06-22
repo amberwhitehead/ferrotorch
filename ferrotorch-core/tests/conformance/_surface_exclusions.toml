@@ -98,12 +98,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::WhereCondBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::BmmBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed)."
@@ -1844,12 +1838,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::where_cond_bcast"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn / forward-helper internal for the indexing family."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::AddbmmBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
@@ -2944,12 +2932,6 @@ reason = "Re-export covered transitively by the Phase 2.1-elementwise conformanc
 path = "ferrotorch_core::norm_with_dim"
 kind = "permanent"
 reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
-
-[[exclusion]]
-path = "ferrotorch_core::ops::indexing::where_cond_bt"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
-tracking_issue = "#1915"
 
 [[exclusion]]
 path = "ferrotorch_core::ops::linalg::MKL_ENABLED"
