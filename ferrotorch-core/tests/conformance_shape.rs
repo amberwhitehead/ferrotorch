@@ -67,15 +67,17 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::indexing::{
     GatherBackward, IndexSelectBackward, IndexSelectDimBackward, MaskedFillBackward,
-    ScatterAddBackward, ScatterBackward, WhereCondBackward, index_select_1d, index_select_1d_it,
-    index_select_dim, masked_fill, masked_fill_bt,
+    MaskedSelectBackward, ScatterAddBackward, ScatterBackward, WhereCondBackward, index_select_1d,
+    index_select_1d_it, index_select_dim, masked_fill, masked_fill_bt, masked_select_bcast,
 };
 use ferrotorch_core::grad_fns::shape::{
     CatBackward, ExpandBackward, FlattenBackward, ReshapeBackward, SplitBackward, SqueezeBackward,
     TransposeBackward, UnsqueezeBackward, cat, expand, flatten, reshape, squeeze, transpose_2d,
     unsqueeze,
 };
-use ferrotorch_core::ops::indexing::{gather, scatter, scatter_add, scatter_value, where_cond};
+use ferrotorch_core::ops::indexing::{
+    gather, masked_select, scatter, scatter_add, scatter_value, where_cond,
+};
 use ferrotorch_core::ops::search::{
     MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
     unique_consecutive,
@@ -91,8 +93,8 @@ use ferrotorch_core::stride_tricks::{
     AsStridedBackward, AsStridedScatterBackward, as_strided, as_strided_copy, as_strided_scatter,
 };
 use ferrotorch_core::{
-    BoolTensor, Device, IntElement, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t,
-    permute_t, split_t, view_t,
+    BoolTensor, Device, FerrotorchError, GradFn, IntElement, IntTensor, Tensor, TensorStorage,
+    chunk_t, contiguous_t, permute_t, split_t, view_t,
 };
 
 /// Free-function `narrow_t` is not re-exported at the crate root; the
@@ -2737,6 +2739,164 @@ fn cpu_masked_fill_via_bool_tensor() {
     assert_eq!(read_back_f32(&r), vec![-7.0, 2.0, -7.0, 4.0]);
 }
 
+#[test]
+fn cpu_masked_select_public_api_broadcast_and_backward() {
+    // PyTorch reference:
+    //   x = torch.tensor([[10., 20.]], requires_grad=True)
+    //   mask = torch.tensor([[True, True], [False, True]])
+    //   torch.masked_select(x, mask) -> tensor([10., 20., 20.])
+    //   out.sum().backward(); x.grad -> tensor([[1., 2.]])
+    let input = make_cpu_f32(&[10.0, 20.0], &[1, 2], true);
+    let mask =
+        BoolTensor::from_vec(vec![true, true, false, true], vec![2, 2]).expect("broadcast mask");
+
+    let out = masked_select_bcast(&input, &mask).expect("masked_select_bcast");
+    assert_eq!(out.shape(), &[3]);
+    check_f32(
+        "masked_select broadcast cpu fwd",
+        &read_back_f32(&out),
+        &[10.0, 20.0, 20.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    out.sum_all()
+        .expect("masked_select sum")
+        .backward()
+        .expect("masked_select backward");
+    let grad = input.grad().unwrap().expect("masked_select grad");
+    assert_eq!(grad.shape(), &[1, 2]);
+    check_f32(
+        "masked_select broadcast cpu grad",
+        &read_back_f32(&grad),
+        &[1.0, 2.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
+fn cpu_masked_select_public_api_scalar_broadcast_edges() {
+    // Scalar input broadcasts to mask shape; selected scalar appearances reduce
+    // back into the scalar leaf.
+    let scalar = make_cpu_f32(&[5.0], &[], true);
+    let vector_mask = BoolTensor::from_vec(vec![true, false, true], vec![3]).expect("vector mask");
+    let out = masked_select(&scalar, &vector_mask).expect("scalar input masked_select");
+    assert_eq!(out.shape(), &[2]);
+    check_f32(
+        "masked_select scalar input fwd",
+        &read_back_f32(&out),
+        &[5.0, 5.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("scalar masked_select sum")
+        .backward()
+        .expect("scalar masked_select backward");
+    let scalar_grad = scalar.grad().unwrap().expect("scalar masked_select grad");
+    assert_eq!(scalar_grad.shape(), &[] as &[usize]);
+    check_f32(
+        "masked_select scalar input grad",
+        &read_back_f32(&scalar_grad),
+        &[2.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    // Scalar true mask broadcasts across a vector input. Exercise the inherent
+    // Tensor<T>::masked_select surface, not just the free function.
+    let vector = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true);
+    let scalar_true = BoolTensor::from_vec(vec![true], vec![]).expect("scalar true mask");
+    let out = vector
+        .masked_select(&scalar_true)
+        .expect("Tensor::masked_select scalar mask");
+    assert_eq!(out.shape(), &[3]);
+    check_f32(
+        "masked_select scalar mask fwd",
+        &read_back_f32(&out),
+        &[1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("vector masked_select sum")
+        .backward()
+        .expect("vector masked_select backward");
+    let vector_grad = vector.grad().unwrap().expect("vector masked_select grad");
+    check_f32(
+        "masked_select scalar mask grad",
+        &read_back_f32(&vector_grad),
+        &[1.0, 1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let scalar_false = BoolTensor::from_vec(vec![false], vec![]).expect("scalar false mask");
+    let empty = vector
+        .masked_select(&scalar_false)
+        .expect("Tensor::masked_select all false");
+    assert_eq!(empty.shape(), &[0]);
+    assert!(read_back_f32(&empty).is_empty());
+}
+
+#[test]
+fn cpu_masked_select_backward_public_struct_validates_and_accepts_strided_grad() {
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
+    let mask = BoolTensor::from_vec(vec![true, false, true], vec![3]).expect("mask");
+    let grad_fn = MaskedSelectBackward {
+        input: input.clone(),
+        mask: mask.clone(),
+    };
+
+    let bad_grad = make_cpu_f32(&[1.0], &[1], false);
+    let err = grad_fn
+        .backward(&bad_grad)
+        .expect_err("short compact grad must be rejected, not indexed");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_mask_fn = MaskedSelectBackward {
+        input: input.clone(),
+        mask: BoolTensor::from_vec(vec![true, false, true, false], vec![4])
+            .expect("wrong-size mask"),
+    };
+    let good_len_grad = make_cpu_f32(&[1.0, 2.0], &[2], false);
+    let err = bad_mask_fn
+        .backward(&good_len_grad)
+        .expect_err("wrong-size saved mask must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    // Non-contiguous grad_output view, logical values [1, 2]. PyTorch's
+    // autograd accepts non-contiguous incoming grads; the backward must read
+    // logical order rather than requiring a contiguous slice.
+    let grad_base = make_cpu_f32(&[9.0, 1.0, 8.0, 2.0], &[4], false);
+    let grad_view = grad_base
+        .as_strided(&[2], &[2], Some(1))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided compact grad is valid");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert_eq!(grad.shape(), &[3]);
+    check_f32(
+        "masked_select backward strided grad",
+        &read_back_f32(grad),
+        &[1.0, 0.0, 2.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let all_false_fn = MaskedSelectBackward {
+        input,
+        mask: BoolTensor::from_vec(vec![false, false, false], vec![3]).expect("all-false mask"),
+    };
+    let empty_grad = Tensor::from_storage(TensorStorage::cpu(Vec::<f32>::new()), vec![0], false)
+        .expect("empty compact grad");
+    let grads = all_false_fn
+        .backward(&empty_grad)
+        .expect("all-false compact grad");
+    let grad = grads[0].as_ref().expect("all-false input grad");
+    check_f32(
+        "masked_select all-false backward",
+        &read_back_f32(grad),
+        &[0.0, 0.0, 0.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Cat A.tensor_ops — triu / tril / diag / diagflat / roll / cdist
 // ---------------------------------------------------------------------------
@@ -4261,6 +4421,98 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_masked_fill_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_masked_select_public_api_broadcast_and_backward() {
+        ensure_cuda_backend();
+        let input = upload_f32(make_cpu_f32(&[10.0, 20.0], &[1, 2], true), Device::Cuda(0));
+        let mask = BoolTensor::from_vec(vec![true, true, false, true], vec![2, 2])
+            .expect("broadcast mask")
+            .to(Device::Cuda(0))
+            .expect("upload mask");
+
+        let out = masked_select_bcast(&input, &mask).expect("CUDA masked_select_bcast");
+        assert!(
+            out.is_cuda(),
+            "masked_select_bcast output must stay CUDA-resident"
+        );
+        assert_eq!(out.shape(), &[3]);
+        check_f32(
+            "masked_select broadcast cuda fwd",
+            &read_back_f32(&out),
+            &[10.0, 20.0, 20.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        out.sum_all()
+            .expect("CUDA masked_select sum")
+            .backward()
+            .expect("CUDA masked_select backward");
+        let grad = input.grad().unwrap().expect("CUDA masked_select grad");
+        assert!(
+            grad.is_cuda(),
+            "masked_select_bcast grad must stay CUDA-resident"
+        );
+        assert_eq!(grad.shape(), &[1, 2]);
+        check_f32(
+            "masked_select broadcast cuda grad",
+            &read_back_f32(&grad),
+            &[1.0, 2.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let scalar = upload_f32(make_cpu_f32(&[5.0], &[], true), Device::Cuda(0));
+        let vector_mask = BoolTensor::from_vec(vec![true, false, true], vec![3])
+            .expect("vector mask")
+            .to(Device::Cuda(0))
+            .expect("upload vector mask");
+        let out = masked_select(&scalar, &vector_mask).expect("CUDA scalar input masked_select");
+        assert!(out.is_cuda(), "scalar masked_select output device");
+        assert_eq!(out.shape(), &[2]);
+        check_f32(
+            "masked_select scalar cuda fwd",
+            &read_back_f32(&out),
+            &[5.0, 5.0],
+            tolerance::F32_BITEXACT,
+        );
+        out.sum_all()
+            .expect("CUDA scalar masked_select sum")
+            .backward()
+            .expect("CUDA scalar masked_select backward");
+        let grad = scalar
+            .grad()
+            .unwrap()
+            .expect("CUDA scalar masked_select grad");
+        assert!(grad.is_cuda(), "scalar masked_select grad device");
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        check_f32(
+            "masked_select scalar cuda grad",
+            &read_back_f32(&grad),
+            &[2.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_masked_select_backward_public_struct_rejects_bad_compact_len() {
+        ensure_cuda_backend();
+        let input = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false)
+            .to(Device::Cuda(0))
+            .expect("upload input");
+        let mask = BoolTensor::from_vec(vec![true, false, true], vec![3])
+            .expect("mask")
+            .to(Device::Cuda(0))
+            .expect("upload mask");
+        let grad_fn = MaskedSelectBackward { input, mask };
+        let bad_grad = make_cpu_f32(&[1.0], &[1], false)
+            .to(Device::Cuda(0))
+            .expect("upload bad grad");
+
+        let err = grad_fn
+            .backward(&bad_grad)
+            .expect_err("CUDA compact grad length must be validated");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
     }
 
     /// CUDA value-correctness for the direct indexing ops. These tests

@@ -1339,6 +1339,15 @@ impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
 
         let input_shape = self.input.shape().to_vec();
         let input_numel: usize = crate::shape::numel(&input_shape);
+        if self.mask.numel() != input_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "masked_select backward: mask numel {} != input numel {}",
+                    self.mask.numel(),
+                    input_numel
+                ),
+            });
+        }
 
         // GPU-resident path (crosslink #1187 Phase 3d): scatter the compacted
         // grad back into a zeros buffer of input.numel() at the true positions,
@@ -1365,8 +1374,18 @@ impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
         // CPU path: walk the host mask, scattering grad[j++] -> grad_input[i] at
         // each true position. `self.mask.data()?` errors if the mask is GPU-
         // resident while grad is on host (the correct device-mismatch signal).
-        let go_data = grad_output.data()?;
         let mask_h = self.mask.data()?;
+        let true_count = mask_h.iter().filter(|&&m| m).count();
+        if grad_output.numel() != true_count {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "masked_select backward: grad_output numel {} != mask true count {}",
+                    grad_output.numel(),
+                    true_count
+                ),
+            });
+        }
+        let go_data = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
         let mut grad_input: Vec<T> = vec![zero; input_numel];
         let mut j = 0usize;

@@ -14378,6 +14378,12 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
+        if input.device_ordinal() != mask.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(input.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(mask.device_ordinal()),
+            });
+        }
         let dev = self.device(input.device_ordinal())?;
         let ord = input.device_ordinal();
         let mb = Self::unwrap_buffer_bool(mask)?.inner();
@@ -14447,9 +14453,25 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
+        if grad_compact.device_ordinal() != mask.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(grad_compact.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(mask.device_ordinal()),
+            });
+        }
         let dev = self.device(grad_compact.device_ordinal())?;
         let ord = grad_compact.device_ordinal();
         let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        let true_count = mk::count_true(mb, dev).map_err(Self::map_gpu_err)?;
+        if grad_compact.len() != true_count {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "masked_scatter: grad_compact has {} elements, but mask has {} true positions",
+                    grad_compact.len(),
+                    true_count
+                ),
+            });
+        }
         match grad_compact.dtype() {
             DType::F32 => Ok(Self::wrap_slice_f32(
                 mk::masked_scatter_32::<f32>(

@@ -1778,12 +1778,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::MaskedSelectBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn / forward-helper internal for the indexing family."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::indexing::PutBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn / forward-helper internal for the indexing family."
@@ -1839,12 +1833,6 @@ tracking_issue = "#1915"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::indexing::masked_scatter"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn / forward-helper internal for the indexing family."
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::masked_select_bcast"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn / forward-helper internal for the indexing family."
 tracking_issue = "#1915"
@@ -2958,12 +2946,6 @@ kind = "permanent"
 reason = "Re-export covered transitively by the Phase 2.2-reduction conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
 
 [[exclusion]]
-path = "ferrotorch_core::ops::indexing::masked_select"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::ops::indexing::where_cond_bt"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
@@ -3146,12 +3128,6 @@ reason = "Re-export covered transitively by the Phase 2.3-shape conformance test
 
 [[exclusion]]
 path = "ferrotorch_core::tensor::Tensor <T>::masked_fill"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1921 (was Phase 2.14-plumbing #776, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1921"
-
-[[exclusion]]
-path = "ferrotorch_core::tensor::Tensor <T>::masked_select"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1921 (was Phase 2.14-plumbing #776, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
 tracking_issue = "#1921"
