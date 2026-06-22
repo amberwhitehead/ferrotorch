@@ -622,6 +622,19 @@ fn upload_f64(t: Tensor<f64>, device: Device) -> Tensor<f64> {
     }
 }
 
+#[cfg(feature = "gpu")]
+fn upload_float_leaf<T: ferrotorch_core::Float>(t: Tensor<T>, device: Device) -> Tensor<T> {
+    if matches!(device, Device::Cuda(_)) {
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
+    } else {
+        t
+    }
+}
+
 fn check_f32(label: &str, actual: &[f32], expected: &[f64], tol: f32) {
     let exp_f32: Vec<f32> = expected.iter().map(|&x| x as f32).collect();
     tolerance::assert_close_f32(actual, &exp_f32, tol, label);
@@ -2532,9 +2545,7 @@ fn run_index_select_for_device(device_label: &str, device: Device) {
                 );
             }
             "float64" => {
-                // f64 GPU path is unsupported for index_select_1d in the
-                // current backend; the fixture skips it. CPU only.
-                let a = make_cpu_f64(in_data, in_shape, false);
+                let a = upload_f64(make_cpu_f64(in_data, in_shape, false), device);
                 let r = index_select_1d(&a, index).expect("index_select_1d");
                 check_f64(
                     &format!("{label} fwd"),
@@ -2542,7 +2553,7 @@ fn run_index_select_for_device(device_label: &str, device: Device) {
                     expected,
                     tolerance::F64_BITEXACT,
                 );
-                let a_g = make_cpu_f64(in_data, in_shape, true);
+                let a_g = upload_f64(make_cpu_f64(in_data, in_shape, true), device);
                 let r_g = index_select_1d(&a_g, index).expect("index_select_1d");
                 let loss = ferrotorch_core::grad_fns::reduction::sum(&r_g).expect("sum");
                 loss.backward().expect("backward");
@@ -2574,6 +2585,56 @@ fn cpu_index_select_1d_via_int_tensor() {
     let r = index_select_1d_it(&a, &idx).expect("index_select_1d_it");
     let got = read_back_f32(&r);
     assert_eq!(got, vec![40.0, 10.0, 30.0]);
+}
+
+#[test]
+fn cpu_index_select_backward_public_struct_validates_and_accepts_strided_grad() {
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true);
+    let grad_fn = IndexSelectBackward {
+        input: input.clone(),
+        indices: vec![1, 1],
+    };
+
+    let bad_shape_grad = make_cpu_f32(&[1.0, 2.0], &[2, 1], false);
+    let err = grad_fn
+        .backward(&bad_shape_grad)
+        .expect_err("same-numel wrong-shape grad must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_rank_fn = IndexSelectBackward {
+        input: make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], true),
+        indices: vec![0],
+    };
+    let err = bad_rank_fn
+        .backward(&make_cpu_f32(&[1.0], &[1], false))
+        .expect_err("legacy 1-D backward must reject non-1-D saved input");
+    assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+
+    let bad_index_fn = IndexSelectBackward {
+        input,
+        indices: vec![3],
+    };
+    let err = bad_index_fn
+        .backward(&make_cpu_f32(&[1.0], &[1], false))
+        .expect_err("out-of-range saved index must be rejected");
+    assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+
+    // Non-contiguous 1-D grad_output, logical values [1, 2].
+    let grad_base = make_cpu_f32(&[1.0, 99.0, 2.0, 99.0], &[4], false);
+    let grad_view = grad_base
+        .as_strided(&[2], &[2], Some(0))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided grad_output is valid");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert_eq!(grad.shape(), &[3]);
+    check_f32(
+        "IndexSelectBackward strided cpu grad",
+        &read_back_f32(grad),
+        &[0.0, 3.0, 0.0],
+        tolerance::F32_BITEXACT,
+    );
 }
 
 #[test]
@@ -4415,6 +4476,147 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_index_select_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_index_select_backward_public_struct_validates_and_accepts_strided_grad() {
+        ensure_cuda_backend();
+        let input = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true), Device::Cuda(0));
+        let grad_fn = IndexSelectBackward {
+            input,
+            indices: vec![1, 1],
+        };
+
+        let bad_shape_grad = upload_f32(make_cpu_f32(&[1.0, 2.0], &[2, 1], false), Device::Cuda(0));
+        let err = grad_fn
+            .backward(&bad_shape_grad)
+            .expect_err("CUDA same-numel wrong-shape grad must be rejected");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+        let cpu_grad = make_cpu_f32(&[1.0, 2.0], &[2], false);
+        let err = grad_fn
+            .backward(&cpu_grad)
+            .expect_err("CPU grad for CUDA saved input must be rejected");
+        assert!(matches!(err, FerrotorchError::DeviceMismatch { .. }));
+
+        let bad_index_fn = IndexSelectBackward {
+            input: upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true), Device::Cuda(0)),
+            indices: vec![3],
+        };
+        let bad_index_grad = upload_f32(make_cpu_f32(&[1.0], &[1], false), Device::Cuda(0));
+        let err = bad_index_fn
+            .backward(&bad_index_grad)
+            .expect_err("CUDA out-of-range saved index must be rejected before launch");
+        assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+
+        // Non-contiguous CUDA grad_output, logical values [1, 2].
+        let grad_base = upload_f32(
+            make_cpu_f32(&[1.0, 99.0, 2.0, 99.0], &[4], false),
+            Device::Cuda(0),
+        );
+        let grad_view = grad_base
+            .as_strided(&[2], &[2], Some(0))
+            .expect("CUDA strided grad_output");
+        let grads = grad_fn
+            .backward(&grad_view)
+            .expect("CUDA strided grad_output is valid");
+        let grad = grads[0].as_ref().expect("input grad");
+        assert!(grad.is_cuda(), "IndexSelectBackward grad must stay CUDA");
+        assert_eq!(grad.shape(), &[3]);
+        check_f32(
+            "IndexSelectBackward strided cuda grad",
+            &read_back_f32(grad),
+            &[0.0, 3.0, 0.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_index_select_1d_f64_f16_bf16_backward() {
+        ensure_cuda_backend();
+
+        let x64 = upload_f64(
+            make_cpu_f64(&[1.0, 2.0, 3.0, 4.0], &[4], true),
+            Device::Cuda(0),
+        );
+        let out64 = index_select_1d(&x64, &[2, 0, 2]).expect("CUDA f64 index_select_1d");
+        assert!(out64.is_cuda(), "f64 output must stay CUDA");
+        check_f64(
+            "index_select_1d cuda f64 fwd",
+            &read_back_f64(&out64),
+            &[3.0, 1.0, 3.0],
+            tolerance::F64_BITEXACT,
+        );
+        out64
+            .sum_all()
+            .expect("f64 sum")
+            .backward()
+            .expect("f64 backward");
+        let grad64 = x64.grad().unwrap().expect("f64 grad");
+        assert!(grad64.is_cuda(), "f64 grad must stay CUDA");
+        check_f64(
+            "index_select_1d cuda f64 grad",
+            &read_back_f64(&grad64),
+            &[1.0, 0.0, 2.0, 0.0],
+            tolerance::F64_BITEXACT,
+        );
+
+        let f16_data: Vec<half::f16> = [1.0_f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v))
+            .collect();
+        let x16 = upload_float_leaf(
+            Tensor::from_storage(TensorStorage::cpu(f16_data), vec![4], true)
+                .expect("f16 cpu tensor"),
+            Device::Cuda(0),
+        );
+        let out16 = index_select_1d(&x16, &[2, 0, 2]).expect("CUDA f16 index_select_1d");
+        assert!(out16.is_cuda(), "f16 output must stay CUDA");
+        let want_out16: Vec<u16> = [3.0_f32, 1.0, 3.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_f16_bits(&out16), want_out16);
+        out16
+            .sum_all()
+            .expect("f16 sum")
+            .backward()
+            .expect("f16 backward");
+        let grad16 = x16.grad().unwrap().expect("f16 grad");
+        assert!(grad16.is_cuda(), "f16 grad must stay CUDA");
+        let want_grad16: Vec<u16> = [1.0_f32, 0.0, 2.0, 0.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_f16_bits(&grad16), want_grad16);
+
+        let bf16_data: Vec<half::bf16> = [1.0_f32, 2.0, 3.0, 4.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let xb = upload_float_leaf(
+            Tensor::from_storage(TensorStorage::cpu(bf16_data), vec![4], true)
+                .expect("bf16 cpu tensor"),
+            Device::Cuda(0),
+        );
+        let outb = index_select_1d(&xb, &[2, 0, 2]).expect("CUDA bf16 index_select_1d");
+        assert!(outb.is_cuda(), "bf16 output must stay CUDA");
+        let want_outb: Vec<u16> = [3.0_f32, 1.0, 3.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_bf16_bits(&outb), want_outb);
+        outb.sum_all()
+            .expect("bf16 sum")
+            .backward()
+            .expect("bf16 backward");
+        let gradb = xb.grad().unwrap().expect("bf16 grad");
+        assert!(gradb.is_cuda(), "bf16 grad must stay CUDA");
+        let want_gradb: Vec<u16> = [1.0_f32, 0.0, 2.0, 0.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_bf16_bits(&gradb), want_gradb);
     }
 
     #[test]

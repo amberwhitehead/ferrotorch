@@ -268,13 +268,55 @@ pub struct IndexSelectBackward<T: Float> {
     pub indices: Vec<usize>,
 }
 
+fn validate_index_select_backward<T: Float>(
+    input: &Tensor<T>,
+    indices: &[usize],
+    grad_output: &Tensor<T>,
+) -> FerrotorchResult<usize> {
+    if input.ndim() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "IndexSelectBackward: expected 1-D saved input, got shape {:?}",
+                input.shape()
+            ),
+        });
+    }
+    let expected_grad_shape = [indices.len()];
+    if grad_output.shape() != expected_grad_shape.as_slice() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "IndexSelectBackward: grad_output shape {:?} does not match expected shape {:?}",
+                grad_output.shape(),
+                expected_grad_shape
+            ),
+        });
+    }
+    if grad_output.device() != input.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: grad_output.device(),
+        });
+    }
+    let input_len = input.shape()[0];
+    for &idx in indices {
+        if idx >= input_len {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: idx,
+                axis: 0,
+                size: input_len,
+            });
+        }
+    }
+    Ok(input_len)
+}
+
 impl<T: Float> GradFn<T> for IndexSelectBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         if !is_grad_enabled() {
             return Ok(vec![None]);
         }
 
-        let input_len = self.input.numel();
+        let input_len = validate_index_select_backward(&self.input, &self.indices, grad_output)?;
 
         if grad_output.is_cuda() {
             // GPU path (#1822/#1823): scatter-add into a zeroed input-shaped
@@ -283,12 +325,10 @@ impl<T: Float> GradFn<T> for IndexSelectBackward<T> {
             // (indices above 2^24 are not representable in f32).
             let dt = T::dtype();
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let ordinal = match grad_output.device() {
-                Device::Cuda(o) => o,
-                _ => unreachable!(),
-            };
+            let ordinal = cuda_ordinal(grad_output.device(), "IndexSelectBackward")?;
             let idx_handle = crate::ops::indexing::upload_index_i64(&self.indices, ordinal)?;
             let zeros = backend.alloc_zeros(input_len, dt, ordinal)?;
+            let grad_output = grad_output.contiguous()?;
             let go_handle = grad_output.gpu_handle()?;
             let result_handle = scatter_dim_cuda_handle::<T>(
                 &zeros,
@@ -309,7 +349,7 @@ impl<T: Float> GradFn<T> for IndexSelectBackward<T> {
             Ok(vec![Some(grad_tensor)])
         } else {
             // CPU path: direct scatter-add.
-            let go_data = grad_output.data()?;
+            let go_data = grad_output.data_vec()?;
             let mut grad_input = vec![<T as num_traits::Zero>::zero(); input_len];
             for (i, &idx) in self.indices.iter().enumerate() {
                 grad_input[idx] += go_data[i];

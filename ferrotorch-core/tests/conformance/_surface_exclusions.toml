@@ -68,12 +68,6 @@ kind = "permanent"
 reason = "Implicit coverage: autograd grad_fn for logcumsumexp; tested via logcumsumexp's grad assertion in conformance_reduction.rs"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::IndexSelectBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::indexing::ScatterAddBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
