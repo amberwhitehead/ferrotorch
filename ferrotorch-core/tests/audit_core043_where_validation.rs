@@ -18,15 +18,13 @@
 //!   `data_vec`, result uploaded to `x`'s device).
 //!
 //! torch contract (live torch 2.11.0+cu130, RTX 3090 — session quoted per
-//! test, R-ORACLE-1(b)): each of these raises `RuntimeError`. This host-mask
-//! surface implements the same-shape (non-broadcasting) subset of
-//! `torch.where`; every red case below is one torch itself rejects, so a
-//! structured `Err` is exact parity (broadcasting `torch.where` lives in
-//! `grad_fns::indexing::where_cond_bcast`).
+//! test, R-ORACLE-1(b)): each red case below raises `RuntimeError`, while the
+//! public `where_cond` / `where_cond_bt` surfaces broadcast exactly like
+//! `torch.where` on valid broadcastable shapes.
 
-use ferrotorch_core::TensorStorage;
 use ferrotorch_core::error::FerrotorchError;
 use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::{BoolTensor, TensorStorage, where_cond, where_cond_bt};
 
 fn t(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
@@ -183,6 +181,53 @@ fn where_same_shape_cpu_still_selects_and_routes_grads() {
     assert_eq!(gy.data().unwrap(), &[0.0, 1.0, 0.0, 1.0]);
 }
 
+/// Public `ferrotorch_core::where_cond` is the host-mask overload. A raw
+/// `&[bool]` has no shape, so it represents the full broadcasted output mask.
+///
+/// Live torch 2.11.0+cu130:
+/// ```text
+/// cond = [[T,T,T],[F,F,F]], x.shape=[1,3], y.shape=[2,1]
+/// torch.where(cond, x, y) -> [[1,2,3],[20,20,20]]
+/// x.grad -> [[1,1,1]], y.grad -> [[0],[3]]
+/// ```
+#[test]
+fn public_where_cond_host_mask_broadcasts_values_and_reduces_grads() {
+    use ferrotorch_core::autograd::graph::backward_with_grad;
+
+    let x = t(&[1.0, 2.0, 3.0], &[1, 3]).requires_grad_(true);
+    let y = t(&[10.0, 20.0], &[2, 1]).requires_grad_(true);
+    let cond = [true, true, true, false, false, false];
+
+    let out = where_cond(&cond, &x, &y).unwrap();
+    assert_eq!(out.shape(), &[2, 3]);
+    assert_eq!(out.data().unwrap(), &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0]);
+
+    let ones = t(&[1.0; 6], &[2, 3]);
+    backward_with_grad(&out, Some(&ones)).unwrap();
+    assert_eq!(x.grad().unwrap().unwrap().data().unwrap(), &[1.0, 1.0, 1.0]);
+    assert_eq!(y.grad().unwrap().unwrap().data().unwrap(), &[0.0, 3.0]);
+}
+
+/// Public `ferrotorch_core::where_cond_bt` is the first-class condition
+/// overload, so the condition participates in PyTorch's three-way broadcast.
+#[test]
+fn public_where_cond_bt_broadcasts_three_operands_and_reduces_grads() {
+    use ferrotorch_core::autograd::graph::backward_with_grad;
+
+    let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1]).unwrap();
+    let x = t(&[1.0, 2.0, 3.0], &[1, 3]).requires_grad_(true);
+    let y = t(&[10.0, 20.0], &[2, 1]).requires_grad_(true);
+
+    let out = where_cond_bt(&cond, &x, &y).unwrap();
+    assert_eq!(out.shape(), &[2, 3]);
+    assert_eq!(out.data().unwrap(), &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0]);
+
+    let ones = t(&[1.0; 6], &[2, 3]);
+    backward_with_grad(&out, Some(&ones)).unwrap();
+    assert_eq!(x.grad().unwrap().unwrap().data().unwrap(), &[1.0, 1.0, 1.0]);
+    assert_eq!(y.grad().unwrap().unwrap().data().unwrap(), &[0.0, 3.0]);
+}
+
 // ---------------------------------------------------------------------------
 // CUDA cases (gpu feature + hardware)
 // ---------------------------------------------------------------------------
@@ -293,5 +338,49 @@ mod gpu {
         );
         let host = out.to(Device::Cpu).unwrap();
         assert_eq!(host.data().unwrap(), &[1.0, 20.0, 3.0, 40.0]);
+    }
+
+    /// CUDA BoolTensor where broadcasts without downloading value tensors; the
+    /// backward gradients remain CUDA-resident and reduce through ExpandBackward
+    /// to the original leaf shapes.
+    #[test]
+    fn public_where_cond_bt_cuda_broadcasts_and_keeps_backward_resident() {
+        use ferrotorch_core::autograd::graph::backward_with_grad;
+
+        ensure_cuda_backend();
+        let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1])
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
+        let x = t(&[1.0, 2.0, 3.0], &[1, 3])
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true);
+        let y = t(&[10.0, 20.0], &[2, 1])
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true);
+
+        let out = where_cond_bt(&cond, &x, &y).unwrap();
+        assert!(out.is_cuda());
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(
+            out.to(Device::Cpu).unwrap().data().unwrap(),
+            &[1.0, 2.0, 3.0, 20.0, 20.0, 20.0]
+        );
+
+        let ones = t(&[1.0; 6], &[2, 3]).to(Device::Cuda(0)).unwrap();
+        backward_with_grad(&out, Some(&ones)).unwrap();
+
+        let x_grad = x.grad().unwrap().unwrap();
+        assert!(x_grad.is_cuda());
+        assert_eq!(
+            x_grad.to(Device::Cpu).unwrap().data().unwrap(),
+            &[1.0, 1.0, 1.0]
+        );
+
+        let y_grad = y.grad().unwrap().unwrap();
+        assert!(y_grad.is_cuda());
+        assert_eq!(y_grad.to(Device::Cpu).unwrap().data().unwrap(), &[0.0, 3.0]);
     }
 }

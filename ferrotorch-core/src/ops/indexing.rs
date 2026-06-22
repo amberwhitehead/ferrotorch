@@ -986,8 +986,10 @@ pub fn scatter_add<T: Float>(
 
 /// Ternary selection: `output[i] = condition[i] ? x[i] : y[i]`.
 ///
-/// All three tensors must have the same shape (no broadcasting yet).
-/// `condition` is a flat `&[bool]` slice.
+/// `x` and `y` broadcast to their PyTorch common shape. Because `condition`
+/// is a raw flat `&[bool]` slice with no shape metadata, it represents the
+/// full flattened output mask and its length must equal the broadcast output
+/// numel.
 ///
 /// If either `x` or `y` requires grad, attaches a `WhereCondBackward`.
 pub fn where_cond<T: Float>(
@@ -995,15 +997,6 @@ pub fn where_cond<T: Float>(
     x: &Tensor<T>,
     y: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
-    if x.shape() != y.shape() {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "where_cond: x shape {:?} != y shape {:?}",
-                x.shape(),
-                y.shape()
-            ),
-        });
-    }
     if x.device() != y.device() {
         return Err(FerrotorchError::DeviceMismatch {
             expected: x.device(),
@@ -1011,24 +1004,42 @@ pub fn where_cond<T: Float>(
         });
     }
 
-    let numel = x.numel();
-    if condition.len() != numel {
+    let output_shape = crate::shape::broadcast_shapes(x.shape(), y.shape()).map_err(|_| {
+        FerrotorchError::ShapeMismatch {
+            message: format!(
+                "where_cond: x shape {:?} and y shape {:?} are not broadcast-compatible",
+                x.shape(),
+                y.shape()
+            ),
+        }
+    })?;
+    let output_numel = output_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "where_cond: broadcast output shape {output_shape:?} element count overflows usize"
+            ),
+        })?;
+    if condition.len() != output_numel {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "where_cond: condition length {} != tensor numel {}",
+                "where_cond: condition length {} != broadcast output numel {} \
+                 (broadcast shape {:?})",
                 condition.len(),
-                numel
+                output_numel,
+                output_shape
             ),
         });
     }
 
-    let cond = crate::bool_tensor::BoolTensor::from_slice(condition, x.shape())?;
-    if x.is_cuda() {
-        let cond = cond.to(x.device())?;
-        return where_cond_bt(&cond, x, y);
-    }
-
-    where_cond_cpu(condition, x, y)
+    let cond = crate::bool_tensor::BoolTensor::from_slice(condition, &output_shape)?;
+    let cond = if x.is_cuda() {
+        cond.to(x.device())?
+    } else {
+        cond
+    };
+    crate::grad_fns::indexing::where_cond_bcast(&cond, x, y)
 }
 
 fn where_cond_cpu<T: Float>(
@@ -1062,15 +1073,15 @@ fn where_cond_cpu<T: Float>(
     }
 }
 
-/// Ternary selection taking a [`BoolTensor`] condition: `output[i] =
-/// cond[i] ? x[i] : y[i]`. Mirrors `torch.where(cond, x, y)`.
+/// Shape-strict ternary selection taking a [`BoolTensor`] condition:
+/// `output[i] = cond[i] ? x[i] : y[i]`.
 ///
 /// All three tensors must share shape and device. When `cond`, `x`, and `y`
 /// are CUDA-resident (same device), the select runs on the GPU through a real
 /// PTX kernel dispatched on `x`'s dtype and the result stays GPU-resident — NO
-/// host crossing (crosslink #1185 Phase 3c). Otherwise it builds the host
-/// `&[bool]` and delegates to the CPU [`where_cond`] (autograd-aware).
-pub fn where_cond_bt<T: Float>(
+/// host crossing (crosslink #1185 Phase 3c). Otherwise it uses the host bool
+/// slice and CPU tensor data after the same-device check.
+pub(crate) fn where_cond_bt_strict<T: Float>(
     cond: &crate::bool_tensor::BoolTensor,
     x: &Tensor<T>,
     y: &Tensor<T>,
@@ -1138,6 +1149,18 @@ pub fn where_cond_bt<T: Float>(
     }
 
     where_cond_cpu(cond.data()?, x, y)
+}
+
+/// Ternary selection taking a [`BoolTensor`] condition. Mirrors
+/// `torch.where(cond, x, y)`: condition, `x`, and `y` broadcast to their common
+/// shape before selecting, and CUDA operands stay on-device when all tensors
+/// live on the same CUDA device.
+pub fn where_cond_bt<T: Float>(
+    cond: &crate::bool_tensor::BoolTensor,
+    x: &Tensor<T>,
+    y: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::grad_fns::indexing::where_cond_bcast(cond, x, y)
 }
 
 /// `masked_select(input, mask)` — return a 1-D tensor of the elements of

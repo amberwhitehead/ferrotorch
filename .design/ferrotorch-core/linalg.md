@@ -162,7 +162,7 @@ Expected: round-trip tests for each decomposition pass.
 | REQ-4 | SHIPPED | impl: `inv` at `ferrotorch-core/src/linalg.rs:310`; non-test consumer: `inv_ex` at `:2139` delegates to `inv` for the success path; production callsite via `lib.rs` re-export. |
 | REQ-5 | SHIPPED | impl: `qr in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API surface used by linear-regression / least-squares helpers downstream. |
 | REQ-6 | SHIPPED | impl: `cholesky in ferrotorch-core/src/linalg.rs`; non-test consumer: `ferrotorch-distributions/src/multivariate_normal.rs` calls `linalg::cholesky` for the MVN covariance factor. |
-| REQ-7 | SHIPPED | impl: `matrix_norm` at `ferrotorch-core/src/linalg.rs:987`; non-test consumer: pub API surface. |
+| REQ-7 | SHIPPED | impl: `matrix_norm` at `ferrotorch-core/src/linalg.rs:1545`; non-test consumer: pub API surface. |
 | REQ-8 | SHIPPED | impl: `pinv` at `ferrotorch-core/src/linalg.rs:530`; non-test consumer: pub API; composes with `svd` (this file). |
 | REQ-9 | SHIPPED | impl: `eigh in ferrotorch-core/src/linalg.rs`, `eigvalsh in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API; used by `matrix_norm` / `cond` for spectral computations on symmetric matrices. |
 | REQ-10 | SHIPPED | impl: `eig` at `ferrotorch-core/src/linalg.rs:677`, `eigvals` at `:735`; non-test consumer: pub API. |
@@ -170,7 +170,7 @@ Expected: round-trip tests for each decomposition pass.
 | REQ-12 | SHIPPED | impl: `lu_factor` at `ferrotorch-core/src/linalg.rs:833`; non-test consumer: pub API used by `solve` on CUDA dispatch and by `tensorsolve`. |
 | REQ-13 | SHIPPED | impl: `svdvals` at `ferrotorch-core/src/linalg.rs:940`; non-test consumer: pub API; also called internally by `matrix_rank` and `cond`. |
 | REQ-14 | SHIPPED | impl: `lstsq_solve in ferrotorch-core/src/linalg.rs`, `lstsq in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API. |
-| REQ-15 | SHIPPED | impl: `matrix_power` at `ferrotorch-core/src/linalg.rs:1106`, `matrix_exp` at `:1920`; non-test consumer: pub API; `matrix_exp` is used by ODE integrators in `ferrotorch-distributions` / continuous-time models. |
+| REQ-15 | SHIPPED | impl: `matrix_power` at `ferrotorch-core/src/linalg.rs:3087`, `matrix_exp` at `ferrotorch-core/src/linalg.rs:4763`; non-test consumer: pub API; `matrix_exp` is used by ODE integrators in `ferrotorch-distributions` / continuous-time models. |
 | REQ-16 | SHIPPED | impl: `tensorsolve` at `ferrotorch-core/src/linalg.rs:1135`, `tensorinv` at `:1163`; non-test consumer: pub API. |
 | REQ-17 | SHIPPED | impl: `vector_norm` at `ferrotorch-core/src/linalg.rs:1194`; non-test consumer: pub API. |
 | REQ-18 | SHIPPED | impl: `slogdet in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API; used by likelihood / log-prob computations in `ferrotorch-distributions`. |

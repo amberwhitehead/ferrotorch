@@ -2262,7 +2262,7 @@ pub fn where_cond_bcast<T: Float>(
     y: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
     if cond.shape() == x.shape() && x.shape() == y.shape() {
-        return crate::ops::indexing::where_cond_bt(cond, x, y);
+        return crate::ops::indexing::where_cond_bt_strict(cond, x, y);
     }
     // 3-way broadcast via two pairwise applications.
     let xy_common = crate::shape::broadcast_shapes(x.shape(), y.shape())?;
@@ -2270,7 +2270,7 @@ pub fn where_cond_bcast<T: Float>(
     let cond_b = broadcast_bool_tensor(cond, &common)?;
     let x_b = crate::grad_fns::shape::expand(x, &common)?;
     let y_b = crate::grad_fns::shape::expand(y, &common)?;
-    crate::ops::indexing::where_cond_bt(&cond_b, &x_b, &y_b)
+    crate::ops::indexing::where_cond_bt_strict(&cond_b, &x_b, &y_b)
 }
 
 // ---------------------------------------------------------------------------

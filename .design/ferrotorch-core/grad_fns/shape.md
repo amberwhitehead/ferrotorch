@@ -199,7 +199,7 @@ and `meta_propagate.rs`.
   incoming chunk-gradient into the original shape at the correct
   offset (`SplitBackward`). The forward pub fn `split_t` lives in
   `split_t in methods.rs`; it consumes `SplitBackward` from this file at
-  `methods.rs:1892 use crate::grad_fns::shape::SplitBackward`.
+  `methods.rs:1927 use crate::grad_fns::shape::SplitBackward`.
 
 - REQ-22: `chunk(input, chunks, dim)` — `torch.chunk`. Per
   `TensorShape.cpp:1077 std::vector<Tensor> chunk(const Tensor& self,
@@ -338,7 +338,7 @@ and `meta_propagate.rs`.
   with the appropriate `NarrowBackward` for autograd.
 - [x] AC-10: `split_t` (`split_t in methods.rs`) returns one tensor per
   chunk, each carrying a `SplitBackward` from this module
-  (`methods.rs:1892 use crate::grad_fns::shape::SplitBackward`).
+  (`methods.rs:1927 use crate::grad_fns::shape::SplitBackward`).
 - [x] AC-11: `chunk_t` (`chunk_t in methods.rs`) computes per-chunk size
   via `(size + chunks - 1) / chunks` then delegates to the same
   `SplitBackward` machinery.
@@ -504,7 +504,7 @@ API and itself the consumer — grandfathered under S5.
 
 The forward `split_t` (`split_t in methods.rs`) and `chunk_t`
 (`chunk_t in methods.rs`) live in `methods.rs` and explicitly import
-`crate::grad_fns::shape::SplitBackward` at `methods.rs:1892`. Each
+`crate::grad_fns::shape::SplitBackward` at `methods.rs:1927`. Each
 chunk produced by `split_t` carries a fresh `SplitBackward`
 recording the chunk's `(dim, offset, chunk_size)`. On backward,
 `SplitBackward` (`SplitBackward in shape.rs`) allocates a zero-filled

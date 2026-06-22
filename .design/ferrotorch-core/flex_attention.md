@@ -98,20 +98,22 @@ Shape + device validation runs at `:91-141`. The implementation:
 2. Transpose K to `[B*H, D, NK]` via `transpose(1, 2)` (`transpose in flex_attention.rs`),
    a zero-copy stride view.
 3. Q@K^T via `grad_fns::linalg::bmm_differentiable` → `[B*H, NQ, NK]`
-   (`:179`). cuBLAS on CUDA.
+   (`flex_attention.rs:205`). cuBLAS on CUDA.
 4. Multiply by `1/sqrt(d)` scalar lifted to the input device
    (`flex_attention.rs`).
-5. Reshape to `[B, H, NQ, NK]` (`:188-191`) for score_mod and softmax.
+5. Reshape to `[B, H, NQ, NK]` (`flex_attention.rs:214-217`) for
+   score_mod and softmax.
 6. If `score_mod` is provided and `B*H > 0`, walk each (b, h),
    `narrow → narrow → squeeze → squeeze` to extract `[NQ, NK]`, invoke
    the callback, validate shape, `unsqueeze → unsqueeze` to lift back to
    `[1, 1, NQ, NK]`, then `cat` along heads and batches. If `B == 0`,
    keep the already-shaped score tensor instead of calling `cat([])`,
    matching PyTorch's empty output behavior.
-7. `softmax` along the last (nk) dim (`:245`).
-8. Reshape weights to `[B*H, NQ, NK]` (`:249-250`).
-9. weights @ V via `bmm_differentiable` → `[B*H, NQ, DV]` (`:253`).
-10. Reshape to `[B, H, NQ, DV]` (`:256-259`).
+7. `softmax` along the last (nk) dim (`flex_attention.rs:275`).
+8. Reshape weights to `[B*H, NQ, NK]` (`flex_attention.rs:279-280`).
+9. weights @ V via `bmm_differentiable` → `[B*H, NQ, DV]`
+   (`flex_attention.rs:283`).
+10. Reshape to `[B, H, NQ, DV]` (`flex_attention.rs:286-289`).
 
 The score-mod callback path's `narrow + squeeze + cat` is a measurable
 overhead vs. the kernel-fused approach PyTorch ships in
