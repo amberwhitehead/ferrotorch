@@ -2976,48 +2976,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was 
 tracking_issue = "#1916"
 
 [[exclusion]]
-path = "ferrotorch_core::ops::phase2c::IntTensor <I>::argmax"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::IntTensor <I>::argmin"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::IntTensor <I>::gather"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::IntTensor <I>::to_float"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::Tensor <T>::argmax"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::Tensor <T>::argmin"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::Tensor <T>::gather"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::repeat_interleave"
 kind = "permanent"
 reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
@@ -3906,11 +3864,6 @@ reason = "CORE-202: tested via gpu_packed_nested_tensor_ops in conformance_neste
 path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_data_tensor"
 kind = "permanent"
 reason = "CORE-202: tested via gpu_packed_nested_tensor_ops in conformance_nested_sparse.rs (`.from_data_tensor` call in code); the inventory key `PackedNestedTensor <T>::from_data_tensor` cannot match real code."
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::Tensor <T>::to_int"
-kind = "permanent"
-reason = "CORE-202: Covered by phase2c_argmax_gather_cast in tests/_probe_phase2c_argmax_gather_cast.rs (turbofish `.to_int::<i32>()`); this gate only scans tests/conformance_*.rs."
 
 [[exclusion]]
 path = "ferrotorch_core::quantize::QatModel::register_layer"

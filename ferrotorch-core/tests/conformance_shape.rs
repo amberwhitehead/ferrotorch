@@ -91,8 +91,8 @@ use ferrotorch_core::stride_tricks::{
     AsStridedBackward, AsStridedScatterBackward, as_strided, as_strided_copy, as_strided_scatter,
 };
 use ferrotorch_core::{
-    BoolTensor, Device, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t, permute_t,
-    split_t, view_t,
+    BoolTensor, Device, IntElement, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t,
+    permute_t, split_t, view_t,
 };
 
 /// Free-function `narrow_t` is not re-exported at the crate root; the
@@ -534,6 +534,41 @@ fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
         let cpu = t.cpu().expect("D2H readback");
         cpu.data_vec().expect("read CPU data after readback")
     }
+}
+
+fn read_back_int<I: IntElement>(t: &IntTensor<I>) -> Vec<I> {
+    if t.device() == Device::Cpu {
+        t.data().expect("read CPU int data").to_vec()
+    } else {
+        let cpu = t.to(Device::Cpu).expect("D2H int readback");
+        cpu.data()
+            .expect("read CPU int data after readback")
+            .to_vec()
+    }
+}
+
+fn read_back_f16_bits(t: &Tensor<half::f16>) -> Vec<u16> {
+    let values = if t.is_cpu() {
+        t.data_vec().expect("read CPU f16 data")
+    } else {
+        t.cpu()
+            .expect("D2H f16 readback")
+            .data_vec()
+            .expect("read CPU f16 data after readback")
+    };
+    values.iter().map(|v| v.to_bits()).collect()
+}
+
+fn read_back_bf16_bits(t: &Tensor<half::bf16>) -> Vec<u16> {
+    let values = if t.is_cpu() {
+        t.data_vec().expect("read CPU bf16 data")
+    } else {
+        t.cpu()
+            .expect("D2H bf16 readback")
+            .data_vec()
+            .expect("read CPU bf16 data after readback")
+    };
+    values.iter().map(|v| v.to_bits()).collect()
 }
 
 fn make_cpu_f32(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f32> {
@@ -2382,6 +2417,187 @@ fn cpu_phase2c_inttensor_index_select_scalar() {
 }
 
 #[test]
+fn cpu_phase2c_tensor_gather_public_api() {
+    let input = Tensor::from_storage(
+        TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        vec![2, 3],
+        false,
+    )
+    .expect("input")
+    .requires_grad_(true);
+    let index = IntTensor::<i32>::from_vec(vec![2, 0, 0, 2], vec![2, 2]).expect("i32 index");
+
+    let out = input
+        .gather(-1, &index)
+        .expect("Tensor<T>::gather public API");
+
+    assert_eq!(out.shape(), &[2, 2]);
+    check_f32(
+        "phase2c tensor gather fwd",
+        &read_back_f32(&out),
+        &[3.0, 1.0, 4.0, 6.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    out.sum_all().expect("sum").backward().expect("backward");
+    let grad = input.grad().unwrap().expect("gather grad");
+    assert_eq!(grad.shape(), &[2, 3]);
+    check_f32(
+        "phase2c tensor gather grad",
+        &read_back_f32(&grad),
+        &[1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
+fn cpu_phase2c_inttensor_gather_public_api() {
+    let input = IntTensor::<i64>::from_vec(vec![1, 2, 3, 4, 5, 6], vec![2, 3]).expect("int input");
+    let index = IntTensor::<i32>::from_vec(vec![1, 0], vec![1, 2]).expect("i32 index");
+
+    let out = input
+        .gather(1, &index)
+        .expect("IntTensor<I>::gather public API");
+
+    assert_eq!(out.shape(), &[1, 2]);
+    assert_eq!(read_back_int(&out), vec![2, 1]);
+}
+
+#[test]
+fn cpu_phase2c_argmax_argmin_public_api() {
+    let floats = Tensor::from_storage(
+        TensorStorage::cpu(vec![1.0_f32, f32::NAN, 3.0, 4.0, f32::NAN, 2.0]),
+        vec![2, 3],
+        false,
+    )
+    .expect("float input");
+
+    assert_eq!(read_back_int(&floats.argmax(None).unwrap()), vec![1]);
+    assert_eq!(read_back_int(&floats.argmin(None).unwrap()), vec![1]);
+    assert_eq!(read_back_int(&floats.argmax(Some(1)).unwrap()), vec![1, 1]);
+    assert_eq!(read_back_int(&floats.argmin(Some(1)).unwrap()), vec![1, 1]);
+
+    let ints = IntTensor::<i32>::from_vec(vec![7, 7, -3, 9, 9, 1], vec![2, 3]).expect("int input");
+    assert_eq!(read_back_int(&ints.argmax(None).unwrap()), vec![3]);
+    assert_eq!(read_back_int(&ints.argmin(None).unwrap()), vec![2]);
+    assert_eq!(read_back_int(&ints.argmax(Some(-1)).unwrap()), vec![0, 0]);
+    assert_eq!(read_back_int(&ints.argmin(Some(-1)).unwrap()), vec![2, 2]);
+}
+
+#[test]
+fn cpu_phase2c_cast_public_api_matches_torch() {
+    let int_values = vec![
+        0_i64,
+        1,
+        -1,
+        65_504,
+        65_505,
+        100_000,
+        16_777_217,
+        i64::from(i32::MAX),
+        i64::from(i32::MIN),
+        i64::MAX,
+        i64::MIN,
+    ];
+    let ints = IntTensor::<i64>::from_vec(int_values, vec![11]).expect("int input");
+
+    let f16 = ints.to_float::<half::f16>().expect("i64 to f16");
+    assert_eq!(
+        read_back_f16_bits(&f16),
+        vec![
+            0x0000, 0x3c00, 0xbc00, 0x7bff, 0x7bff, 0x7c00, 0x7c00, 0x7c00, 0xfc00, 0x7c00, 0xfc00,
+        ]
+    );
+
+    let bf16 = ints.to_float::<half::bf16>().expect("i64 to bf16");
+    assert_eq!(
+        read_back_bf16_bits(&bf16),
+        vec![
+            0x0000, 0x3f80, 0xbf80, 0x4780, 0x4780, 0x47c3, 0x4b80, 0x4f00, 0xcf00, 0x5f00, 0xdf00,
+        ]
+    );
+
+    let f32_bits: Vec<u32> = read_back_f32(&ints.to_float::<f32>().expect("i64 to f32"))
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+    assert_eq!(
+        f32_bits,
+        vec![
+            0x00000000, 0x3f800000, 0xbf800000, 0x477fe000, 0x477fe100, 0x47c35000, 0x4b800000,
+            0x4f000000, 0xcf000000, 0x5f000000, 0xdf000000,
+        ]
+    );
+
+    let f64_bits: Vec<u64> = read_back_f64(&ints.to_float::<f64>().expect("i64 to f64"))
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
+    assert_eq!(
+        f64_bits,
+        vec![
+            0x0000000000000000,
+            0x3ff0000000000000,
+            0xbff0000000000000,
+            0x40effc0000000000,
+            0x40effc2000000000,
+            0x40f86a0000000000,
+            0x4170000010000000,
+            0x41dfffffffc00000,
+            0xc1e0000000000000,
+            0x43e0000000000000,
+            0xc3e0000000000000,
+        ]
+    );
+
+    let floats = Tensor::from_storage(
+        TensorStorage::cpu(vec![
+            0.0_f32,
+            1.9,
+            -1.9,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            2_147_483_647.0,
+            2_147_483_648.0,
+            -2_147_483_649.0,
+        ]),
+        vec![9],
+        false,
+    )
+    .expect("float input");
+    let cpu_i32: IntTensor<i32> = Tensor::<f32>::to_int(&floats).expect("f32 to i32");
+    assert_eq!(
+        read_back_int(&cpu_i32),
+        vec![
+            0,
+            1,
+            -1,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN,
+            i32::MIN
+        ]
+    );
+    assert_eq!(
+        read_back_int(&floats.to_int::<i64>().expect("f32 to i64")),
+        vec![
+            0,
+            1,
+            -1,
+            i64::MIN,
+            i64::MIN,
+            i64::MIN,
+            2_147_483_648,
+            2_147_483_648,
+            -2_147_483_648,
+        ]
+    );
+}
+
+#[test]
 fn cpu_index_select_dim_scalar() {
     let input = make_cpu_f32(&[5.0], &[], true);
     let index = IntTensor::<i64>::from_vec(vec![0], vec![1]).expect("one index");
@@ -3756,6 +3972,241 @@ mod gpu {
         );
         assert_eq!(int_out.shape(), &[] as &[usize]);
         assert_eq!(int_out.to(Device::Cpu).unwrap().data().unwrap(), &[5]);
+    }
+
+    #[test]
+    fn gpu_phase2c_tensor_gather_public_api() {
+        ensure_cuda_backend();
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec![2, 3],
+            false,
+        )
+        .expect("input")
+        .to(Device::Cuda(0))
+        .expect("upload")
+        .requires_grad_(true);
+        let index = IntTensor::<i32>::from_vec(vec![2, 0, 0, 2], vec![2, 2])
+            .expect("i32 index")
+            .to(Device::Cuda(0))
+            .expect("upload index");
+
+        let out = input
+            .gather(-1, &index)
+            .expect("CUDA Tensor<T>::gather public API");
+
+        assert_eq!(out.device(), Device::Cuda(0), "gather output device");
+        assert_eq!(out.shape(), &[2, 2]);
+        check_f32(
+            "phase2c tensor gather cuda fwd",
+            &read_back_f32(&out),
+            &[3.0, 1.0, 4.0, 6.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        out.sum_all().expect("sum").backward().expect("backward");
+        let grad = input.grad().unwrap().expect("gather cuda grad");
+        assert_eq!(grad.device(), Device::Cuda(0), "gather grad device");
+        assert_eq!(grad.shape(), &[2, 3]);
+        check_f32(
+            "phase2c tensor gather cuda grad",
+            &read_back_f32(&grad),
+            &[1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_phase2c_inttensor_gather_public_api() {
+        ensure_cuda_backend();
+        let input = IntTensor::<i64>::from_vec(vec![1, 2, 3, 4, 5, 6], vec![2, 3])
+            .expect("int input")
+            .to(Device::Cuda(0))
+            .expect("upload input");
+        let index = IntTensor::<i32>::from_vec(vec![1, 0], vec![1, 2])
+            .expect("i32 index")
+            .to(Device::Cuda(0))
+            .expect("upload index");
+
+        let out = input
+            .gather(1, &index)
+            .expect("CUDA IntTensor<I>::gather public API");
+
+        assert!(out.is_cuda(), "IntTensor gather must stay CUDA-resident");
+        assert_eq!(out.shape(), &[1, 2]);
+        assert_eq!(read_back_int(&out), vec![2, 1]);
+    }
+
+    #[test]
+    fn gpu_phase2c_argmax_argmin_public_api() {
+        ensure_cuda_backend();
+        let floats = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, f32::NAN, 3.0, 4.0, f32::NAN, 2.0]),
+            vec![2, 3],
+            false,
+        )
+        .expect("float input")
+        .to(Device::Cuda(0))
+        .expect("upload floats");
+
+        let flat_max = floats.argmax(None).unwrap();
+        let flat_min = floats.argmin(None).unwrap();
+        assert!(flat_max.is_cuda(), "argmax output must stay CUDA-resident");
+        assert!(flat_min.is_cuda(), "argmin output must stay CUDA-resident");
+        assert_eq!(read_back_int(&flat_max), vec![1]);
+        assert_eq!(read_back_int(&flat_min), vec![1]);
+
+        let dim_max = floats.argmax(Some(1)).unwrap();
+        let dim_min = floats.argmin(Some(1)).unwrap();
+        assert!(dim_max.is_cuda(), "argmax(dim) output device");
+        assert!(dim_min.is_cuda(), "argmin(dim) output device");
+        assert_eq!(read_back_int(&dim_max), vec![1, 1]);
+        assert_eq!(read_back_int(&dim_min), vec![1, 1]);
+
+        let ints = IntTensor::<i32>::from_vec(vec![7, 7, -3, 9, 9, 1], vec![2, 3])
+            .expect("int input")
+            .to(Device::Cuda(0))
+            .expect("upload ints");
+        let int_flat_max = ints.argmax(None).unwrap();
+        let int_flat_min = ints.argmin(None).unwrap();
+        assert!(
+            int_flat_max.is_cuda(),
+            "IntTensor argmax output must stay CUDA-resident"
+        );
+        assert!(
+            int_flat_min.is_cuda(),
+            "IntTensor argmin output must stay CUDA-resident"
+        );
+        assert_eq!(read_back_int(&int_flat_max), vec![3]);
+        assert_eq!(read_back_int(&int_flat_min), vec![2]);
+        assert_eq!(read_back_int(&ints.argmax(Some(-1)).unwrap()), vec![0, 0]);
+        assert_eq!(read_back_int(&ints.argmin(Some(-1)).unwrap()), vec![2, 2]);
+    }
+
+    #[test]
+    fn gpu_phase2c_cast_public_api_matches_torch_cuda() {
+        ensure_cuda_backend();
+        let int_values = vec![
+            0_i64,
+            1,
+            -1,
+            65_504,
+            65_505,
+            100_000,
+            16_777_217,
+            i64::from(i32::MAX),
+            i64::from(i32::MIN),
+            i64::MAX,
+            i64::MIN,
+        ];
+        let ints = IntTensor::<i64>::from_vec(int_values, vec![11])
+            .expect("int input")
+            .to(Device::Cuda(0))
+            .expect("upload ints");
+
+        let f16 = ints.to_float::<half::f16>().expect("i64 to f16");
+        assert!(f16.is_cuda(), "to_float::<f16> must stay CUDA-resident");
+        assert_eq!(
+            read_back_f16_bits(&f16),
+            vec![
+                0x0000, 0x3c00, 0xbc00, 0x7bff, 0x7bff, 0x7c00, 0x7c00, 0x7c00, 0xfc00, 0x7c00,
+                0xfc00,
+            ]
+        );
+
+        let bf16 = ints.to_float::<half::bf16>().expect("i64 to bf16");
+        assert!(bf16.is_cuda(), "to_float::<bf16> must stay CUDA-resident");
+        assert_eq!(
+            read_back_bf16_bits(&bf16),
+            vec![
+                0x0000, 0x3f80, 0xbf80, 0x4780, 0x4780, 0x47c3, 0x4b80, 0x4f00, 0xcf00, 0x5f00,
+                0xdf00,
+            ]
+        );
+
+        let f32 = ints.to_float::<f32>().expect("i64 to f32");
+        assert!(f32.is_cuda(), "to_float::<f32> must stay CUDA-resident");
+        let f32_bits: Vec<u32> = read_back_f32(&f32).iter().map(|v| v.to_bits()).collect();
+        assert_eq!(
+            f32_bits,
+            vec![
+                0x00000000, 0x3f800000, 0xbf800000, 0x477fe000, 0x477fe100, 0x47c35000, 0x4b800000,
+                0x4f000000, 0xcf000000, 0x5f000000, 0xdf000000,
+            ]
+        );
+
+        let f64 = ints.to_float::<f64>().expect("i64 to f64");
+        assert!(f64.is_cuda(), "to_float::<f64> must stay CUDA-resident");
+        let f64_bits: Vec<u64> = read_back_f64(&f64).iter().map(|v| v.to_bits()).collect();
+        assert_eq!(
+            f64_bits,
+            vec![
+                0x0000000000000000,
+                0x3ff0000000000000,
+                0xbff0000000000000,
+                0x40effc0000000000,
+                0x40effc2000000000,
+                0x40f86a0000000000,
+                0x4170000010000000,
+                0x41dfffffffc00000,
+                0xc1e0000000000000,
+                0x43e0000000000000,
+                0xc3e0000000000000,
+            ]
+        );
+
+        let floats = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                0.0_f32,
+                1.9,
+                -1.9,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                2_147_483_647.0,
+                2_147_483_648.0,
+                -2_147_483_649.0,
+            ]),
+            vec![9],
+            false,
+        )
+        .expect("float input")
+        .to(Device::Cuda(0))
+        .expect("upload floats");
+
+        let i32s: IntTensor<i32> = Tensor::<f32>::to_int(&floats).expect("f32 to i32");
+        assert!(i32s.is_cuda(), "to_int::<i32> must stay CUDA-resident");
+        assert_eq!(
+            read_back_int(&i32s),
+            vec![
+                0,
+                1,
+                -1,
+                0,
+                i32::MAX,
+                i32::MIN,
+                i32::MAX,
+                i32::MAX,
+                i32::MIN
+            ]
+        );
+
+        let i64s = floats.to_int::<i64>().expect("f32 to i64");
+        assert!(i64s.is_cuda(), "to_int::<i64> must stay CUDA-resident");
+        assert_eq!(
+            read_back_int(&i64s),
+            vec![
+                0,
+                1,
+                -1,
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+                2_147_483_648,
+                2_147_483_648,
+                -2_147_483_648,
+            ]
+        );
     }
 
     #[test]
