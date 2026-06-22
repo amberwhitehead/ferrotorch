@@ -2659,6 +2659,128 @@ fn solution_from_b_f32<T: Float>(b_work: &[f32], dims: LstsqDims) -> FerrotorchR
     )
 }
 
+fn rust_lstsq_rank_tensor(driver: LstsqDriver, rank: usize) -> FerrotorchResult<IntTensor<i64>> {
+    if driver == LstsqDriver::Gels {
+        empty_rank(Device::Cpu)
+    } else {
+        scalar_rank(rank, Device::Cpu)
+    }
+}
+
+fn rust_lstsq_gels_rank_check(
+    driver: LstsqDriver,
+    rank: usize,
+    dims: LstsqDims,
+) -> FerrotorchResult<()> {
+    if driver == LstsqDriver::Gels && rank < dims.n {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "lstsq(gels): the least-squares solution could not be computed \
+                 because the input matrix does not have full rank (rank {rank} < n {})",
+                dims.n
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn rust_lstsq_f64<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    rcond: Option<f64>,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    if dims.m == 0 || dims.n == 0 {
+        return lstsq_degenerate_f64(b, dims, driver);
+    }
+
+    let a_arr = tensor_to_array2_f64(a)?;
+    let b_arr = tensor_to_arraydyn_f64(b)?;
+    let (sol_arr, residuals_arr, rank, sv_arr) =
+        ferray_linalg::lstsq(&a_arr, &b_arr, rcond).map_err(FerrotorchError::Ferray)?;
+    rust_lstsq_gels_rank_check(driver, rank, dims)?;
+
+    let sol = Tensor::from_storage(
+        TensorStorage::cpu(slice_to_vec::<T>(sol_arr.as_slice().unwrap())),
+        solution_shape(dims),
+        false,
+    )?;
+
+    let residuals = if driver == LstsqDriver::Gelsy {
+        empty_float_tensor(Device::Cpu)?
+    } else {
+        let data = residuals_arr.as_slice().unwrap();
+        Tensor::from_storage(
+            TensorStorage::cpu(slice_to_vec::<T>(data)),
+            vec![data.len()],
+            false,
+        )?
+    };
+
+    let rank_tensor = rust_lstsq_rank_tensor(driver, rank)?;
+    let sv = if matches!(driver, LstsqDriver::Gelsd | LstsqDriver::Gelss) {
+        let data = sv_arr.as_slice().unwrap();
+        Tensor::from_storage(
+            TensorStorage::cpu(slice_to_vec::<T>(data)),
+            vec![data.len()],
+            false,
+        )?
+    } else {
+        empty_float_tensor(Device::Cpu)?
+    };
+    Ok((sol, residuals, rank_tensor, sv))
+}
+
+fn rust_lstsq_f32<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    rcond: Option<f64>,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    if dims.m == 0 || dims.n == 0 {
+        return lstsq_degenerate_f32(b, dims, driver);
+    }
+
+    let a_arr = tensor_to_array2_f32(a)?;
+    let b_arr = tensor_to_arraydyn_f32(b)?;
+    let rcond = rcond.map(|v| v as f32);
+    let (sol_arr, residuals_arr, rank, sv_arr) =
+        ferray_linalg::lstsq(&a_arr, &b_arr, rcond).map_err(FerrotorchError::Ferray)?;
+    rust_lstsq_gels_rank_check(driver, rank, dims)?;
+
+    let sol = Tensor::from_storage(
+        TensorStorage::cpu(slice_f32_to_vec::<T>(sol_arr.as_slice().unwrap())),
+        solution_shape(dims),
+        false,
+    )?;
+
+    let residuals = if driver == LstsqDriver::Gelsy {
+        empty_float_tensor(Device::Cpu)?
+    } else {
+        let data = residuals_arr.as_slice().unwrap();
+        Tensor::from_storage(
+            TensorStorage::cpu(slice_f32_to_vec::<T>(data)),
+            vec![data.len()],
+            false,
+        )?
+    };
+
+    let rank_tensor = rust_lstsq_rank_tensor(driver, rank)?;
+    let sv = if matches!(driver, LstsqDriver::Gelsd | LstsqDriver::Gelss) {
+        let data = sv_arr.as_slice().unwrap();
+        Tensor::from_storage(
+            TensorStorage::cpu(slice_f32_to_vec::<T>(data)),
+            vec![data.len()],
+            false,
+        )?
+    } else {
+        empty_float_tensor(Device::Cpu)?
+    };
+    Ok((sol, residuals, rank_tensor, sv))
+}
+
 fn lstsq_degenerate_f64<T: Float>(
     b: &Tensor<T>,
     dims: LstsqDims,
@@ -2735,7 +2857,10 @@ fn cpu_lapack_lstsq_f64<T: Float>(
     if dims.m == 0 || dims.n == 0 {
         return lstsq_degenerate_f64(b, dims, driver);
     }
-    let backend = lapacke_backend()?;
+    let backend = match lapacke_backend() {
+        Ok(backend) => backend,
+        Err(_) => return rust_lstsq_f64(a, b, dims, rcond, driver),
+    };
     let mut a_work: Vec<f64> = a.data_vec()?.iter().map(|v| v.to_f64().unwrap()).collect();
     let mut b_work = pack_b_f64(b, dims)?;
     let m = checked_lapack_i32(dims.m, "m")?;
@@ -2849,7 +2974,10 @@ fn cpu_lapack_lstsq_f32<T: Float>(
     if dims.m == 0 || dims.n == 0 {
         return lstsq_degenerate_f32(b, dims, driver);
     }
-    let backend = lapacke_backend()?;
+    let backend = match lapacke_backend() {
+        Ok(backend) => backend,
+        Err(_) => return rust_lstsq_f32(a, b, dims, rcond, driver),
+    };
     let mut a_work: Vec<f32> = a
         .data_vec()?
         .iter()

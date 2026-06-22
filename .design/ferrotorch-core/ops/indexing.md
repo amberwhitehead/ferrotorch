@@ -114,7 +114,7 @@ needed, stores the GPU cond directly in `WhereCondBackward` (no
 `cond.to(Cpu)`; #1187 Phase 3d). CPU fallback materialises the bool slice via
 `cond.data()?` and delegates to `where_cond`.
 
-`masked_select` at `:1165` rejects mask/input numel mismatch. The GPU
+`masked_select` at `:1316` rejects mask/input numel mismatch. The GPU
 path inside `masked_select in ops/indexing.rs` (if both are CUDA, same
 device) routes to
 `backend.masked_select_count_*` + `backend.masked_select_compact_*`

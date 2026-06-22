@@ -149,30 +149,38 @@ fn core169_small_a_regime_unchanged() {
     }
 }
 
-/// CUDA lane: unlike the unary special ops (which round-trip through
-/// `unary_map`'s documented host fallback), the BINARY special ops dispatch
-/// through `binary_map`, which has no CUDA path — on CUDA inputs they return
-/// a structured `Err` (same contract the in-module `zeta_cuda_not_implemented`
-/// documents; the unary/binary round-trip inconsistency is audit CORE-177,
-/// tracked separately). R-LOUD-1: the error is the contract — what this test
-/// pins is that no silently-wrong VALUE can come back from the CUDA lane, so
-/// the CORE-169 fix cannot be bypassed by a diverging device kernel.
+/// CUDA lane: PyTorch ships CUDA igamma/igammac kernels
+/// (`aten/src/ATen/native/cuda/IGammaKernel.cu`), and ferrotorch's CUDA path
+/// mirrors that with a composed, CUDA-resident implementation. R-LOUD-1: this
+/// pins the large-a regression on the device path too, so the CORE-169 fix
+/// cannot be bypassed by a stale or CPU-only implementation.
 #[cfg(feature = "gpu")]
 #[test]
-fn core169_gammainc_cuda_is_structured_error_not_silent_value() {
+fn core169_gammainc_cuda_large_a_matches_torch_and_stays_resident() {
     ensure_cuda_backend();
     let a = t64(&[1e5], &[1]).to(Device::Cuda(0)).unwrap();
     let x = t64(&[1e5], &[1]).to(Device::Cuda(0)).unwrap();
-    let p = gammainc(&a, &x);
+    let p = gammainc(&a, &x).expect("cuda gammainc large-a");
     assert!(
-        p.is_err(),
-        "gammainc on CUDA must be a structured error (no device kernel exists), got {:?}",
-        p.map(|t| t.data_vec())
+        p.is_cuda(),
+        "gammainc CUDA result must stay resident, got {:?}",
+        p.device()
     );
-    let q = gammaincc(&a, &x);
+    assert_rel(
+        p.to(Device::Cpu).unwrap().data_vec().unwrap()[0],
+        0.5004205221045142,
+        "cuda gammainc(1e5, 1e5)",
+    );
+
+    let q = gammaincc(&a, &x).expect("cuda gammaincc large-a");
     assert!(
-        q.is_err(),
-        "gammaincc on CUDA must be a structured error (no device kernel exists), got {:?}",
-        q.map(|t| t.data_vec())
+        q.is_cuda(),
+        "gammaincc CUDA result must stay resident, got {:?}",
+        q.device()
+    );
+    assert_rel(
+        q.to(Device::Cpu).unwrap().data_vec().unwrap()[0],
+        0.49957947789548585,
+        "cuda gammaincc(1e5, 1e5)",
     );
 }

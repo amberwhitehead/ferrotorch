@@ -2194,6 +2194,190 @@ fn cpu_scatter_add() {
 }
 
 #[test]
+fn cpu_scatter_add_scalar_and_empty_match_torch_backward() {
+    // PyTorch treats scalar self as an effective length-1 dimension for
+    // scatter_add, while preserving a scalar output shape.
+    let input = make_cpu_f32(&[5.0], &[], true);
+    let src = make_cpu_f32(&[1.0, 1.0], &[2], true);
+    let out = scatter_add(&input, 0, &[0, 0], &[2], &src).expect("scalar scatter_add");
+    assert_eq!(out.shape(), &[] as &[usize]);
+    check_f32(
+        "scatter_add scalar cpu fwd",
+        &read_back_f32(&out),
+        &[7.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.backward().expect("scalar scatter_add backward");
+    let input_grad = input.grad().unwrap().expect("input grad");
+    let src_grad = src.grad().unwrap().expect("src grad");
+    assert_eq!(input_grad.shape(), &[] as &[usize]);
+    assert_eq!(src_grad.shape(), &[2]);
+    check_f32(
+        "scatter_add scalar cpu input grad",
+        &read_back_f32(&input_grad),
+        &[1.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "scatter_add scalar cpu src grad",
+        &read_back_f32(&src_grad),
+        &[1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    // Scalar index/source are valid for a 1-D self; src grad is scalar, not
+    // a length-1 tensor.
+    let input = make_cpu_f32(&[0.0, 0.0, 0.0], &[3], true);
+    let src = make_cpu_f32(&[5.0], &[], true);
+    let out = scatter_add(&input, 0, &[1], &[], &src).expect("scalar index scatter_add");
+    assert_eq!(out.shape(), &[3]);
+    check_f32(
+        "scatter_add scalar-index cpu fwd",
+        &read_back_f32(&out),
+        &[0.0, 5.0, 0.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("scalar-index sum")
+        .backward()
+        .expect("scalar-index backward");
+    let input_grad = input.grad().unwrap().expect("input grad");
+    let src_grad = src.grad().unwrap().expect("src grad");
+    check_f32(
+        "scatter_add scalar-index cpu input grad",
+        &read_back_f32(&input_grad),
+        &[1.0, 1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+    assert_eq!(src_grad.shape(), &[] as &[usize]);
+    check_f32(
+        "scatter_add scalar-index cpu src grad",
+        &read_back_f32(&src_grad),
+        &[1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    // Empty index returns input before rank/shape checks. Its src derivative
+    // is zero_like(src) when the empty index-shaped gradient can broadcast
+    // back to src, matching PyTorch's engine behavior.
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let src = make_cpu_f32(&[9.0], &[1], true);
+    let out = scatter_add(&input, 1, &[], &[999, 0], &src).expect("empty scatter_add");
+    check_f32(
+        "scatter_add empty cpu fwd",
+        &read_back_f32(&out),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("empty sum")
+        .backward()
+        .expect("empty backward");
+    let input_grad = input.grad().unwrap().expect("input grad");
+    let src_grad = src.grad().unwrap().expect("src grad");
+    check_f32(
+        "scatter_add empty cpu input grad",
+        &read_back_f32(&input_grad),
+        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "scatter_add empty cpu broadcast-compatible src grad",
+        &read_back_f32(&src_grad),
+        &[0.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true);
+    let src = make_cpu_f32(&[0.0, 0.0, 0.0, 0.0, 0.0], &[5], true);
+    let out = scatter_add(&input, 0, &[], &[0], &src).expect("empty incompatible scatter_add");
+    let err = out
+        .sum_all()
+        .expect("empty incompatible sum")
+        .backward()
+        .expect_err("empty incompatible src grad must error like PyTorch");
+    assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+}
+
+#[test]
+fn cpu_scatter_add_backward_public_struct_validates_and_accepts_strided_grad() {
+    let input = make_cpu_f32(&[0.0, 0.0, 0.0], &[3], true);
+    let src = make_cpu_f32(&[1.0, 2.0], &[2], true);
+    let grad_fn = ScatterAddBackward {
+        input: input.clone(),
+        src: src.clone(),
+        dim: 0,
+        index: vec![1, 1],
+        index_shape: vec![2],
+    };
+
+    let bad_grad = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false);
+    let err = grad_fn
+        .backward(&bad_grad)
+        .expect_err("same-numel wrong-shape grad must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_dim_fn = ScatterAddBackward {
+        input: input.clone(),
+        src: src.clone(),
+        dim: 1,
+        index: vec![1],
+        index_shape: vec![1],
+    };
+    let err = bad_dim_fn
+        .backward(&make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false))
+        .expect_err("out-of-range saved dim must be rejected");
+    assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+
+    let bad_index_fn = ScatterAddBackward {
+        input: input.clone(),
+        src: make_cpu_f32(&[1.0], &[1], true),
+        dim: 0,
+        index: vec![3],
+        index_shape: vec![1],
+    };
+    let err = bad_index_fn
+        .backward(&make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false))
+        .expect_err("out-of-range saved index must be rejected");
+    assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+
+    let bad_src_fn = ScatterAddBackward {
+        input,
+        src: make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true),
+        dim: 0,
+        index: vec![1, 1],
+        index_shape: vec![2],
+    };
+    let err = bad_src_fn
+        .backward(&make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false))
+        .expect_err("non-empty incompatible src grad must be rejected");
+    assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+
+    // Non-contiguous 1-D grad_output, logical values [1, 2, 3].
+    let grad_base = make_cpu_f32(&[1.0, 99.0, 2.0, 99.0, 3.0], &[5], false);
+    let grad_view = grad_base
+        .as_strided(&[3], &[2], Some(0))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided grad_output is valid");
+    let input_grad = grads[0].as_ref().expect("input grad");
+    let src_grad = grads[1].as_ref().expect("src grad");
+    check_f32(
+        "ScatterAddBackward strided cpu input grad",
+        &read_back_f32(input_grad),
+        &[1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "ScatterAddBackward strided cpu src grad",
+        &read_back_f32(src_grad),
+        &[2.0, 2.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
 fn cpu_where_cond() {
     let file = load_fixtures();
     let cases = cases_for(&file, "where_cond", "cpu");
@@ -5324,6 +5508,248 @@ mod gpu {
             "where_cond cuda",
             &read_back_f32(&r),
             &[1.0, 20.0, 3.0, 40.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_scatter_add_scalar_and_dtype_backward_match_torch() {
+        ensure_cuda_backend();
+
+        let scalar = upload_f32(make_cpu_f32(&[5.0], &[], true), Device::Cuda(0));
+        let scalar_src = upload_f32(make_cpu_f32(&[1.0, 1.0], &[2], true), Device::Cuda(0));
+        let out =
+            scatter_add(&scalar, 0, &[0, 0], &[2], &scalar_src).expect("CUDA scalar scatter_add");
+        assert!(out.is_cuda(), "scalar scatter_add output must stay CUDA");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        check_f32(
+            "scatter_add scalar cuda fwd",
+            &read_back_f32(&out),
+            &[7.0],
+            tolerance::F32_BITEXACT,
+        );
+        out.backward().expect("CUDA scalar scatter_add backward");
+        let scalar_grad = scalar.grad().unwrap().expect("scalar grad");
+        let scalar_src_grad = scalar_src.grad().unwrap().expect("scalar src grad");
+        assert!(scalar_grad.is_cuda(), "scalar input grad must stay CUDA");
+        assert!(scalar_src_grad.is_cuda(), "scalar src grad must stay CUDA");
+        assert_eq!(scalar_grad.shape(), &[] as &[usize]);
+        assert_eq!(scalar_src_grad.shape(), &[2]);
+        check_f32(
+            "scatter_add scalar cuda input grad",
+            &read_back_f32(&scalar_grad),
+            &[1.0],
+            tolerance::F32_BITEXACT,
+        );
+        check_f32(
+            "scatter_add scalar cuda src grad",
+            &read_back_f32(&scalar_src_grad),
+            &[1.0, 1.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let x64 = upload_f64(
+            make_cpu_f64(&[0.0, 0.0, 0.0, 0.0], &[4], true),
+            Device::Cuda(0),
+        );
+        let src64 = upload_f64(make_cpu_f64(&[1.0, 2.0, 3.0], &[3], true), Device::Cuda(0));
+        let out64 = scatter_add(&x64, 0, &[2, 0, 2], &[3], &src64).expect("CUDA f64 scatter_add");
+        assert!(out64.is_cuda(), "f64 scatter_add output must stay CUDA");
+        check_f64(
+            "scatter_add cuda f64 fwd",
+            &read_back_f64(&out64),
+            &[2.0, 0.0, 4.0, 0.0],
+            tolerance::F64_BITEXACT,
+        );
+        out64
+            .sum_all()
+            .expect("f64 scatter_add sum")
+            .backward()
+            .expect("f64 scatter_add backward");
+        let x64_grad = x64.grad().unwrap().expect("f64 input grad");
+        let src64_grad = src64.grad().unwrap().expect("f64 src grad");
+        assert!(x64_grad.is_cuda(), "f64 input grad must stay CUDA");
+        assert!(src64_grad.is_cuda(), "f64 src grad must stay CUDA");
+        check_f64(
+            "scatter_add cuda f64 input grad",
+            &read_back_f64(&x64_grad),
+            &[1.0, 1.0, 1.0, 1.0],
+            tolerance::F64_BITEXACT,
+        );
+        check_f64(
+            "scatter_add cuda f64 src grad",
+            &read_back_f64(&src64_grad),
+            &[1.0, 1.0, 1.0],
+            tolerance::F64_BITEXACT,
+        );
+
+        let f16_src_data: Vec<half::f16> = [1.0_f32, 2.0, 3.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v))
+            .collect();
+        let x16 = upload_float_leaf(
+            Tensor::from_storage(
+                TensorStorage::cpu(vec![half::f16::from_f32(0.0); 4]),
+                vec![4],
+                true,
+            )
+            .expect("f16 input"),
+            Device::Cuda(0),
+        );
+        let src16 = upload_float_leaf(
+            Tensor::from_storage(TensorStorage::cpu(f16_src_data), vec![3], true).expect("f16 src"),
+            Device::Cuda(0),
+        );
+        let out16 = scatter_add(&x16, 0, &[2, 0, 2], &[3], &src16).expect("CUDA f16 scatter_add");
+        assert!(out16.is_cuda(), "f16 scatter_add output must stay CUDA");
+        let want_out16: Vec<u16> = [2.0_f32, 0.0, 4.0, 0.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_f16_bits(&out16), want_out16);
+        out16
+            .sum_all()
+            .expect("f16 scatter_add sum")
+            .backward()
+            .expect("f16 scatter_add backward");
+        let x16_grad = x16.grad().unwrap().expect("f16 input grad");
+        let src16_grad = src16.grad().unwrap().expect("f16 src grad");
+        assert!(x16_grad.is_cuda(), "f16 input grad must stay CUDA");
+        assert!(src16_grad.is_cuda(), "f16 src grad must stay CUDA");
+        let want_x16_grad: Vec<u16> = [1.0_f32, 1.0, 1.0, 1.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let want_src16_grad: Vec<u16> = [1.0_f32, 1.0, 1.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_f16_bits(&x16_grad), want_x16_grad);
+        assert_eq!(read_back_f16_bits(&src16_grad), want_src16_grad);
+
+        let bf16_src_data: Vec<half::bf16> = [1.0_f32, 2.0, 3.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let xb = upload_float_leaf(
+            Tensor::from_storage(
+                TensorStorage::cpu(vec![half::bf16::from_f32(0.0); 4]),
+                vec![4],
+                true,
+            )
+            .expect("bf16 input"),
+            Device::Cuda(0),
+        );
+        let srcb = upload_float_leaf(
+            Tensor::from_storage(TensorStorage::cpu(bf16_src_data), vec![3], true)
+                .expect("bf16 src"),
+            Device::Cuda(0),
+        );
+        let outb = scatter_add(&xb, 0, &[2, 0, 2], &[3], &srcb).expect("CUDA bf16 scatter_add");
+        assert!(outb.is_cuda(), "bf16 scatter_add output must stay CUDA");
+        let want_outb: Vec<u16> = [2.0_f32, 0.0, 4.0, 0.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_bf16_bits(&outb), want_outb);
+        outb.sum_all()
+            .expect("bf16 scatter_add sum")
+            .backward()
+            .expect("bf16 scatter_add backward");
+        let xb_grad = xb.grad().unwrap().expect("bf16 input grad");
+        let srcb_grad = srcb.grad().unwrap().expect("bf16 src grad");
+        assert!(xb_grad.is_cuda(), "bf16 input grad must stay CUDA");
+        assert!(srcb_grad.is_cuda(), "bf16 src grad must stay CUDA");
+        let want_xb_grad: Vec<u16> = [1.0_f32, 1.0, 1.0, 1.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let want_srcb_grad: Vec<u16> = [1.0_f32, 1.0, 1.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(read_back_bf16_bits(&xb_grad), want_xb_grad);
+        assert_eq!(read_back_bf16_bits(&srcb_grad), want_srcb_grad);
+    }
+
+    #[test]
+    fn gpu_scatter_add_backward_public_struct_validates_and_accepts_strided_grad() {
+        ensure_cuda_backend();
+        let input = upload_f32(make_cpu_f32(&[0.0, 0.0, 0.0], &[3], true), Device::Cuda(0));
+        let src = upload_f32(make_cpu_f32(&[1.0, 2.0], &[2], true), Device::Cuda(0));
+        let grad_fn = ScatterAddBackward {
+            input: input.clone(),
+            src: src.clone(),
+            dim: 0,
+            index: vec![1, 1],
+            index_shape: vec![2],
+        };
+
+        let bad_shape_grad = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false),
+            Device::Cuda(0),
+        );
+        let err = grad_fn
+            .backward(&bad_shape_grad)
+            .expect_err("CUDA same-numel wrong-shape grad must be rejected");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+        let cpu_grad = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
+        let err = grad_fn
+            .backward(&cpu_grad)
+            .expect_err("CPU grad for CUDA saved input must be rejected");
+        assert!(matches!(err, FerrotorchError::DeviceMismatch { .. }));
+
+        let bad_index_fn = ScatterAddBackward {
+            input: input.clone(),
+            src: upload_f32(make_cpu_f32(&[1.0], &[1], true), Device::Cuda(0)),
+            dim: 0,
+            index: vec![3],
+            index_shape: vec![1],
+        };
+        let valid_grad = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false), Device::Cuda(0));
+        let err = bad_index_fn
+            .backward(&valid_grad)
+            .expect_err("CUDA out-of-range saved index must be rejected before launch");
+        assert!(matches!(err, FerrotorchError::IndexOutOfBounds { .. }));
+
+        let bad_src_fn = ScatterAddBackward {
+            input: input.clone(),
+            src: upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0], &[3], true), Device::Cuda(0)),
+            dim: 0,
+            index: vec![1, 1],
+            index_shape: vec![2],
+        };
+        let err = bad_src_fn
+            .backward(&valid_grad)
+            .expect_err("CUDA incompatible src grad shape must be rejected");
+        assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
+
+        // Non-contiguous CUDA grad_output, logical values [1, 2, 3].
+        let grad_base = upload_f32(
+            make_cpu_f32(&[1.0, 99.0, 2.0, 99.0, 3.0], &[5], false),
+            Device::Cuda(0),
+        );
+        let grad_view = grad_base
+            .as_strided(&[3], &[2], Some(0))
+            .expect("CUDA strided grad_output");
+        let grads = grad_fn
+            .backward(&grad_view)
+            .expect("CUDA strided grad_output is valid");
+        let input_grad = grads[0].as_ref().expect("input grad");
+        let src_grad = grads[1].as_ref().expect("src grad");
+        assert!(input_grad.is_cuda(), "input grad must stay CUDA");
+        assert!(src_grad.is_cuda(), "src grad must stay CUDA");
+        check_f32(
+            "ScatterAddBackward strided cuda input grad",
+            &read_back_f32(input_grad),
+            &[1.0, 2.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+        check_f32(
+            "ScatterAddBackward strided cuda src grad",
+            &read_back_f32(src_grad),
+            &[2.0, 2.0],
             tolerance::F32_BITEXACT,
         );
     }

@@ -462,7 +462,11 @@ fn scatter_value_gpu_bf16_forward_backward_matches_torch() {
     let grad_input = grads[0].as_ref().expect("input grad");
     assert!(grad_input.is_cuda());
     assert_eq!(host_bf16(grad_input), vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-    assert!(grads[1].is_none(), "scalar scatter has no src gradient");
+    assert_eq!(
+        grads.len(),
+        1,
+        "torch scatter(dim, index, scalar) exposes only the input tensor to autograd"
+    );
 }
 
 #[test]
