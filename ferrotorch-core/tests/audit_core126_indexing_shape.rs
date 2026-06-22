@@ -101,6 +101,72 @@ fn core126_cpu_smaller_non_dim_axis_matches_torch_contract() {
 }
 
 #[test]
+fn core126_cpu_scatter_value_empty_index_skips_shape_checks_like_torch() {
+    let input = input_2x3(true);
+    let out = ferrotorch_core::ops::indexing::scatter_value(&input, 1, &[], &[999, 0], 9.0)
+        .expect("torch.scatter value returns a clone for empty index before rank/shape checks");
+
+    assert_eq!(out.shape(), &[2, 3]);
+    assert_eq!(out.data_vec().unwrap(), input.data_vec().unwrap());
+
+    ferrotorch_core::autograd::graph::backward(&out.sum_all().unwrap()).unwrap();
+    let grad = input
+        .grad()
+        .unwrap()
+        .expect("empty scatter_value still has identity input VJP");
+    assert_eq!(grad.shape(), &[2, 3]);
+    assert_eq!(grad.data_vec().unwrap(), vec![1.0; 6]);
+}
+
+#[test]
+fn core126_cpu_scatter_value_scalar_input_matches_torch_contract() {
+    let input = cpu_f32(&[5.0], &[], true);
+    let out = ferrotorch_core::ops::indexing::scatter_value(&input, -1, &[0], &[], 9.0)
+        .expect("torch.scatter value accepts 0-d self with scalar index");
+
+    assert_eq!(out.shape(), &[] as &[usize]);
+    assert_eq!(out.data_vec().unwrap(), vec![9.0]);
+
+    ferrotorch_core::autograd::graph::backward(&out).unwrap();
+    let grad = input
+        .grad()
+        .unwrap()
+        .expect("scalar scatter_value should zero overwritten input grad");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    assert_eq!(grad.data_vec().unwrap(), vec![0.0]);
+
+    let input = cpu_f32(&[5.0], &[], true);
+    let out = ferrotorch_core::ops::indexing::scatter_value(&input, 0, &[], &[0], 9.0)
+        .expect("torch.scatter value accepts empty 1-D index for 0-d self");
+    assert_eq!(out.shape(), &[] as &[usize]);
+    assert_eq!(out.data_vec().unwrap(), vec![5.0]);
+
+    ferrotorch_core::autograd::graph::backward(&out).unwrap();
+    let grad = input
+        .grad()
+        .unwrap()
+        .expect("empty scalar scatter_value should pass input grad through");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    assert_eq!(grad.data_vec().unwrap(), vec![1.0]);
+}
+
+#[test]
+fn core126_cpu_scatter_value_duplicate_indices_zero_input_grad_once() {
+    let input = cpu_f32(&[0.0, 1.0, 2.0, 3.0], &[4], true);
+    let out =
+        ferrotorch_core::ops::indexing::scatter_value(&input, 0, &[1, 1, 2], &[3], 9.0).unwrap();
+
+    assert_eq!(out.data_vec().unwrap(), vec![0.0, 9.0, 9.0, 3.0]);
+
+    ferrotorch_core::autograd::graph::backward(&out.sum_all().unwrap()).unwrap();
+    let grad = input
+        .grad()
+        .unwrap()
+        .expect("scatter_value duplicate-index input grad");
+    assert_eq!(grad.data_vec().unwrap(), vec![1.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
 fn core126_cpu_gather_empty_index_skips_shape_checks_like_torch() {
     let out = gather(&input_2x3(false), 1, &[], &[999, 0])
         .expect("torch.gather returns empty output before rank/shape checks");
@@ -199,6 +265,64 @@ mod gpu {
             valued.cpu().unwrap().data_vec().unwrap(),
             vec![9.0, 0.0, 9.0, 0.0, 0.0, 0.0],
         );
+    }
+
+    #[test]
+    fn core126_cuda_scatter_value_empty_index_stays_resident_and_identity_grad() {
+        ensure_cuda_backend();
+        let input = cuda(input_2x3(false), true);
+
+        let out = ferrotorch_core::ops::indexing::scatter_value(&input, 1, &[], &[999, 0], 9.0)
+            .expect("CUDA empty scatter_value must mirror torch's early clone");
+
+        assert!(
+            out.is_cuda(),
+            "empty scatter_value result must stay CUDA-resident"
+        );
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(
+            out.cpu().unwrap().data_vec().unwrap(),
+            vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+        );
+
+        backward(&out.sum_all().unwrap()).unwrap();
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("empty CUDA scatter_value input grad");
+        assert!(
+            grad.is_cuda(),
+            "empty scatter_value backward must stay CUDA-resident"
+        );
+        assert_eq!(grad.cpu().unwrap().data_vec().unwrap(), vec![1.0; 6]);
+    }
+
+    #[test]
+    fn core126_cuda_scatter_value_scalar_input_uses_resident_effective_1d_path() {
+        ensure_cuda_backend();
+        let input = cuda(cpu_f32(&[5.0], &[], false), true);
+
+        let out = ferrotorch_core::ops::indexing::scatter_value(&input, -1, &[0], &[], 9.0)
+            .expect("CUDA scalar scatter_value must use torch's nonempty dim contract");
+
+        assert!(
+            out.is_cuda(),
+            "scalar scatter_value result must stay CUDA-resident"
+        );
+        assert_eq!(out.shape(), &[] as &[usize]);
+        assert_eq!(out.cpu().unwrap().data_vec().unwrap(), vec![9.0]);
+
+        backward(&out).unwrap();
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("scalar CUDA scatter_value input grad");
+        assert!(
+            grad.is_cuda(),
+            "scalar scatter_value backward must stay CUDA-resident"
+        );
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        assert_eq!(grad.cpu().unwrap().data_vec().unwrap(), vec![0.0]);
     }
 
     #[test]

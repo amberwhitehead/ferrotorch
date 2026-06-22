@@ -124,21 +124,21 @@ output). The data itself stays GPU-resident.
 
 **Non-test consumers**:
 
-- `crate::tensor::Tensor::masked_select` at `tensor.rs:1855`
+- `crate::tensor::Tensor::masked_select` at `tensor.rs:2066`
   invokes `crate::ops::indexing::masked_select(self, mask)` — the
   method-style entry point on `Tensor<T>`. REQ-6 consumer.
 - `crate::grad_fns::cumulative::cumsum_backward` at
-  `grad_fns/cumulative.rs:503` calls
+  `grad_fns/cumulative.rs:571` calls
   `crate::ops::indexing::scatter_add(&zeros, dim as isize, indices,
   input_shape, grad_output)` — the production scatter-add consumer
   in the cumulative-sum backward. REQ-3 consumer.
-- `crate::grad_fns::indexing::masked_select_backward` at
-  `grad_fns/indexing.rs:1983,1988` calls
-  `crate::ops::indexing::masked_select(input, mask)` — recursive
-  use in the autograd VJP. REQ-6 consumer.
-- `crate::grad_fns::indexing::where_cond_backward` at
-  `grad_fns/indexing.rs:1845,1853` calls
-  `crate::ops::indexing::where_cond_bt(cond, x, y)` — REQ-5 consumer.
+- `crate::grad_fns::indexing::masked_select_bcast` at
+  `grad_fns/indexing.rs:2294,2298` calls
+  `crate::ops::indexing::masked_select(input, mask)` — broadcast wrapper
+  consumer. REQ-6 consumer.
+- `crate::ops::indexing::where_cond_bt` at
+  `grad_fns/indexing.rs:3867` is called from scatter-reduce backward for
+  the value-aware VJP — REQ-5 consumer.
 - Re-exported at `lib.rs:211` as
   `ferrotorch_core::{gather, masked_select, scatter, scatter_add,
   where_cond, where_cond_bt}`.
@@ -148,8 +148,9 @@ output). The data itself stays GPU-resident.
 `parity_ops = []` (no specific parity-sweep op declared in the
 route). The indexing operations participate in parity-sweep through
 the differentiable wrappers in `grad_fns::indexing` (e.g.
-`gather_differentiable`, `where_differentiable`); divergence in
-those tests would surface against this module's forward.
+`where_cond_bcast`, `masked_select_bcast`, and the scatter-reduce
+backward helpers); divergence in those tests would surface against this
+module's forward.
 
 ## Verification
 
@@ -166,10 +167,10 @@ the focused `ferrotorch-gpu` divergence tests.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `gather` at `ops/indexing.rs:112`; non-test consumer: re-exported as `ferrotorch_core::gather` at `lib.rs:211` (boundary public API per goal.md S5) |
 | REQ-2 | SHIPPED | impl: `scatter` at `ops/indexing.rs:183`; non-test consumer: re-exported as `ferrotorch_core::scatter` at `lib.rs:211` |
-| REQ-3 | SHIPPED | impl: `scatter_add` at `ops/indexing.rs:259`; non-test consumer: `crate::grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:503` invokes `crate::ops::indexing::scatter_add` for the cumulative-sum backward — production autograd consumer |
+| REQ-3 | SHIPPED | impl: `scatter_add` at `ops/indexing.rs:861`; non-test consumer: `crate::grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:571` invokes `crate::ops::indexing::scatter_add` for the cumulative-sum backward — production autograd consumer |
 | REQ-4 | SHIPPED | impl: `where_cond in ops/indexing.rs`; non-test consumer: re-exported as `ferrotorch_core::where_cond` at `ops in lib.rs`; called transitively from `where_cond_bt` CPU fallback at `ops in lib.rs` |
-| REQ-5 | SHIPPED | impl: `where_cond_bt` at `ops/indexing.rs:1039`; non-test consumer: `crate::grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` invokes `crate::ops::indexing::where_cond_bt(cond, x, y)` for both the residency-detected and CPU paths |
-| REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:1165`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1855` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1983,1988` |
+| REQ-5 | SHIPPED | impl: `where_cond_bt` at `ops/indexing.rs:1185`; non-test consumer: `crate::ops::indexing::where_cond_bt` at `grad_fns/indexing.rs:3867` is invoked from scatter-reduce backward for the value-aware VJP |
+| REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:1211`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:2066` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_bcast` at `grad_fns/indexing.rs:2294,2298` |
 | REQ-7 | SHIPPED | impl: grad-fn attachment in each forward path (e.g. `gather` at `attachment in ops/indexing.rs`, `scatter in ops/indexing.rs`, `scatter_add in ops/indexing.rs`, `where_cond in ops/indexing.rs`); non-test consumer: every autograd-tracking caller of these forwards |
 | REQ-8 | SHIPPED | impl: `validate_gather_shapes in ops/indexing.rs` (the SAFETY-bounded i64 widening lives in `upload_index_i64 in ops/indexing.rs`); non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
 | REQ-9 | SHIPPED | CUDA-resident dim-aware/rank-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64/f16/bf16 branches in each `ops/indexing.rs` pub fn, plus `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_{dim,nd}_*`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`). The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the branch whenever their operands are CUDA-resident. |

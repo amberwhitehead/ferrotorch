@@ -23,8 +23,8 @@
 //! | REQ-2 | SHIPPED | `scatter` at `ops/indexing.rs:183` + scalar-src overload `scatter_value` at `ops/indexing.rs:306` (closes #1258 mirroring `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2278`); consumer: re-export at `lib.rs:174`; non-test consumer for `scatter_value`: `Tensor::scatter_value_t` at `methods.rs:1166`. |
 //! | REQ-3 | SHIPPED | `scatter_add` at `ops/indexing.rs:259`; consumer: `grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:503` invokes `ops::indexing::scatter_add` |
 //! | REQ-4 | SHIPPED | `where_cond` at `ops/indexing.rs:334`; consumer: re-export at `lib.rs:174`; `where_cond_bt` CPU fallback at `:458` |
-//! | REQ-5 | SHIPPED | `where_cond_bt` at `ops/indexing.rs:397`; consumer: `grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` |
-//! | REQ-6 | SHIPPED | `masked_select` at `ops/indexing.rs:478`; consumer: `tensor::Tensor::masked_select` at `tensor.rs:1146`; `grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1823,1828` |
+//! | REQ-5 | SHIPPED | `where_cond_bt` at `ops/indexing.rs:1185`; consumer: `grad_fns::indexing::ScatterReduceBackward` at `grad_fns/indexing.rs:3867` |
+//! | REQ-6 | SHIPPED | `masked_select` at `ops/indexing.rs:1211`; consumer: `tensor::Tensor::masked_select` at `tensor.rs:2066`; `grad_fns::indexing::masked_select_bcast` at `grad_fns/indexing.rs:2294` |
 //! | REQ-7 | SHIPPED | grad-fn attachment (e.g. `gather` at `ops/indexing.rs:154-164`); consumer: every autograd-tracking caller |
 //! | REQ-8 | SHIPPED | `validate_gather_shapes` at `ops/indexing.rs:66`; consumer: `gather`/`scatter`/`scatter_add` |
 
@@ -661,11 +661,8 @@ pub fn scatter<T: Float>(
 /// avoids the temporary `src` allocation.
 ///
 /// Autograd note: the scalar `value` is not a differentiable input, so
-/// gradients route only to `input` via a `ScatterValueBackward`-shaped path
-/// — for now we route through the existing `ScatterBackward` by
-/// materialising a `src` of zeros (the value-arm grad of `src` is
-/// discarded anyway). When `input` does not require grad, no autograd node
-/// is attached.
+/// gradients route only to `input` via the PyTorch derivative
+/// `grad.scatter(dim, index, 0)`.
 pub fn scatter_value<T: Float>(
     input: &Tensor<T>,
     dim: isize,
@@ -674,21 +671,70 @@ pub fn scatter_value<T: Float>(
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
     let ndim = input.ndim();
-    if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "scatter_value: input must have at least 1 dimension".into(),
-        });
-    }
-    let dim = normalize_axis(dim, ndim)?;
+    let effective_input_shape: Vec<usize> = if ndim == 0 {
+        vec![1]
+    } else {
+        input.shape().to_vec()
+    };
+    let effective_ndim = effective_input_shape.len();
+    let effective_index_shape: Vec<usize> = if ndim == 0 && index_shape.is_empty() {
+        vec![1]
+    } else {
+        index_shape.to_vec()
+    };
+    let dim = normalize_axis(dim, effective_ndim)?;
     let input_shape = input.shape();
 
     // CORE-125 (#1819): validate the index metadata + values BEFORE the CUDA
     // fast path (upstream runs `scatter_shape_check` in the meta function
     // before any device kernel is selected,
     // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
-    let index_numel =
-        validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
-    validate_index_fits_input_non_dim("scatter_value", input_shape, dim, index_shape)?;
+    let claimed_index_numel = checked_index_numel(index_shape)?;
+    if claimed_index_numel == 0 {
+        if !index.is_empty() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "scatter_value: index slice has {} elements but index_shape {:?} implies 0",
+                    index.len(),
+                    index_shape
+                ),
+            });
+        }
+
+        let output_shape = input_shape.to_vec();
+        let storage = if input.is_cuda() {
+            let input_c = input.contiguous()?;
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            TensorStorage::gpu(backend.clone_buffer(input_c.gpu_handle()?)?)
+        } else {
+            TensorStorage::cpu(input.data_vec()?)
+        };
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterValueBackward {
+                input: input.clone(),
+                dim,
+                index: Vec::new(),
+                index_shape: index_shape.to_vec(),
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+
+    let index_numel = validate_gather_shapes(
+        &effective_input_shape,
+        dim,
+        &effective_index_shape,
+        index,
+        effective_input_shape[dim],
+    )?;
+    validate_index_fits_input_non_dim(
+        "scatter_value",
+        &effective_input_shape,
+        dim,
+        &effective_index_shape,
+    )?;
 
     // CUDA-resident fast path: `input` on a CUDA device. The host
     // index uploads as a resident `i64` buffer; the broadcast scalar `value`
@@ -702,7 +748,6 @@ pub fn scatter_value<T: Float>(
                 // buffer matches its logical shape.
                 let original_input = input.clone();
                 let input = input.contiguous()?;
-                let input_shape: &[usize] = input.shape();
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -715,8 +760,8 @@ pub fn scatter_value<T: Float>(
                         value.to_f32().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f32".into(),
                         })?,
-                        input_shape,
-                        index_shape,
+                        &effective_input_shape,
+                        &effective_index_shape,
                         dim,
                     )?,
                     DType::F64 => backend.scatter_value_nd_f64(
@@ -725,8 +770,8 @@ pub fn scatter_value<T: Float>(
                         value.to_f64().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f64".into(),
                         })?,
-                        input_shape,
-                        index_shape,
+                        &effective_input_shape,
+                        &effective_index_shape,
                         dim,
                     )?,
                     DType::F16 => backend.scatter_value_nd_f16(
@@ -735,8 +780,8 @@ pub fn scatter_value<T: Float>(
                         value.to_f32().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f32".into(),
                         })?,
-                        input_shape,
-                        index_shape,
+                        &effective_input_shape,
+                        &effective_index_shape,
                         dim,
                     )?,
                     DType::BF16 => backend.scatter_value_nd_bf16(
@@ -745,27 +790,20 @@ pub fn scatter_value<T: Float>(
                         value.to_f32().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f32".into(),
                         })?,
-                        input_shape,
-                        index_shape,
+                        &effective_input_shape,
+                        &effective_index_shape,
                         dim,
                     )?,
                     _ => unreachable!(),
                 };
-                let output_shape = input_shape.to_vec();
+                let output_shape = original_input.shape().to_vec();
                 let storage = TensorStorage::gpu(h);
                 if is_grad_enabled() && original_input.requires_grad() {
-                    let zero = <T as num_traits::Zero>::zero();
-                    let zeros_src = Tensor::from_storage(
-                        TensorStorage::cpu(vec![zero; crate::shape::numel(index_shape)]),
-                        index_shape.to_vec(),
-                        false,
-                    )?;
-                    let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
+                    let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterValueBackward {
                         input: original_input,
-                        src: zeros_src,
                         dim,
                         index: index.to_vec(),
-                        index_shape: index_shape.to_vec(),
+                        index_shape: effective_index_shape.clone(),
                     });
                     return Tensor::from_operation(storage, output_shape, grad_fn);
                 }
@@ -781,38 +819,27 @@ pub fn scatter_value<T: Float>(
 
     let mut output = input.data_vec()?;
 
-    let mut coords = vec![0usize; ndim];
+    let mut coords = vec![0usize; effective_ndim];
     for i in 0..index_numel {
         let idx_val = index[i];
         let mut dst_coords = coords.clone();
         dst_coords[dim] = idx_val;
-        let dst_flat = flat_index(&dst_coords, input_shape);
+        let dst_flat = flat_index(&dst_coords, &effective_input_shape);
         output[dst_flat] = value;
 
         if i + 1 < index_numel {
-            increment_coords(&mut coords, index_shape);
+            increment_coords(&mut coords, &effective_index_shape);
         }
     }
 
     let output_shape = input_shape.to_vec();
 
     if is_grad_enabled() && input.requires_grad() {
-        // Route through ScatterBackward by passing a zeros `src` — the
-        // value-arm has no `src` gradient (scalar is not differentiable),
-        // and the `input` gradient is the standard scatter zero-out at the
-        // written positions.
-        let zero = <T as num_traits::Zero>::zero();
-        let zeros_src = Tensor::from_storage(
-            TensorStorage::cpu(vec![zero; index_numel]),
-            index_shape.to_vec(),
-            false,
-        )?;
-        let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
+        let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterValueBackward {
             input: input.clone(),
-            src: zeros_src,
             dim,
             index: index.to_vec(),
-            index_shape: index_shape.to_vec(),
+            index_shape: effective_index_shape,
         });
         Tensor::from_operation(TensorStorage::cpu(output), output_shape, grad_fn)
     } else {

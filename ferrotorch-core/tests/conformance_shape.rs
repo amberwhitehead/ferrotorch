@@ -15,7 +15,7 @@
 //! - `ferrotorch-core/src/grad_fns/indexing.rs` — `index_select_1d`,
 //!   `masked_fill` plus the canonical `*Backward` structs.
 //! - `ferrotorch-core/src/ops/indexing.rs` — `gather`, `scatter`,
-//!   `scatter_add`, `where_cond`.
+//!   `scatter_value`, `scatter_add`, `where_cond`.
 //! - `ferrotorch-core/src/ops/tensor_ops.rs` — `triu`, `tril`, `diag`,
 //!   `diagflat`, `roll`, `cdist`.
 //! - `ferrotorch-core/src/ops/search.rs` — `searchsorted`, `bucketize`,
@@ -74,7 +74,7 @@ use ferrotorch_core::grad_fns::shape::{
     TransposeBackward, UnsqueezeBackward, cat, expand, flatten, reshape, squeeze, transpose_2d,
     unsqueeze,
 };
-use ferrotorch_core::ops::indexing::{gather, scatter, scatter_add, where_cond};
+use ferrotorch_core::ops::indexing::{gather, scatter, scatter_add, scatter_value, where_cond};
 use ferrotorch_core::ops::search::{
     MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
     unique_consecutive,
@@ -2050,6 +2050,46 @@ fn cpu_scatter() {
 }
 
 #[test]
+fn cpu_scatter_value() {
+    let inp = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], true);
+    let r = scatter_value(&inp, 0, &[0, 2], &[2], 9.0).expect("scatter_value");
+    check_f32(
+        "scatter_value cpu fwd",
+        &read_back_f32(&r),
+        &[9.0, 2.0, 9.0, 4.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&r).expect("sum");
+    loss.backward().expect("backward");
+    let grad = inp.grad().unwrap().expect("grad");
+    check_f32(
+        "scatter_value cpu grad_a",
+        &read_back_f32(&grad),
+        &[0.0, 1.0, 0.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let inp = make_cpu_f64(&[5.0], &[], true);
+    let r = scatter_value(&inp, -1, &[0], &[], 7.0_f64).expect("scatter_value scalar self");
+    assert_eq!(r.shape(), &[] as &[usize]);
+    check_f64(
+        "scatter_value scalar cpu fwd",
+        &read_back_f64(&r),
+        &[7.0],
+        tolerance::F64_BITEXACT,
+    );
+    r.backward().expect("scalar backward");
+    let grad = inp.grad().unwrap().expect("scalar grad");
+    check_f64(
+        "scatter_value scalar cpu grad_a",
+        &read_back_f64(&grad),
+        &[0.0],
+        tolerance::F64_BITEXACT,
+    );
+}
+
+#[test]
 fn cpu_scatter_add() {
     let file = load_fixtures();
     let cases = cases_for(&file, "scatter_add", "cpu");
@@ -3622,6 +3662,32 @@ mod gpu {
             "scatter_add cuda",
             &read_back_f32(&r),
             &[11.0, 2.0, 23.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        // scatter_value([1,2,3,4], dim=0, index=[0,2], value=9) -> [9,2,9,4]
+        let r = scatter_value(&cuda_a, 0, &[0, 2], &[2], 9.0).expect("scatter_value on cuda");
+        assert_eq!(r.device(), Device::Cuda(0), "scatter_value output device");
+        check_f32(
+            "scatter_value cuda",
+            &read_back_f32(&r),
+            &[9.0, 2.0, 9.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let cuda_leaf = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false)
+            .to(Device::Cuda(0))
+            .expect("upload")
+            .requires_grad_(true);
+        let r = scatter_value(&cuda_leaf, 0, &[0, 2], &[2], 9.0).expect("scatter_value grad cuda");
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&r).expect("sum");
+        loss.backward().expect("scatter_value backward cuda");
+        let grad = cuda_leaf.grad().unwrap().expect("scatter_value cuda grad");
+        assert_eq!(grad.device(), Device::Cuda(0), "scatter_value grad device");
+        check_f32(
+            "scatter_value cuda grad_a",
+            &read_back_f32(&grad),
+            &[0.0, 1.0, 0.0, 1.0],
             tolerance::F32_BITEXACT,
         );
 

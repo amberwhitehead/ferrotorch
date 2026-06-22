@@ -2976,12 +2976,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
-path = "ferrotorch_core::ops::indexing::scatter_value"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::ops::indexing::where_cond_bt"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."

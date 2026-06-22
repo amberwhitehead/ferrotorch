@@ -5,6 +5,7 @@
 //! - `masked_fill` — fills elements where a boolean mask is true
 //! - `gather` — gathers elements along an axis (N-D)
 //! - `scatter` — scatters src values into input along an axis
+//! - `scatter.value` — scatters one scalar value into input along an axis
 //! - `scatter_add` — scatter with addition
 //! - `where_cond` — ternary selection
 //!
@@ -983,6 +984,55 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
 
     fn name(&self) -> &'static str {
         "ScatterBackward"
+    }
+}
+
+/// Backward function for N-D `scatter.value`.
+///
+/// Forward: `output = input.clone(); output[index-mapped coords] = value`.
+///
+/// VJP for input mirrors PyTorch's `derivatives.yaml` rule for
+/// `scatter.value`: `grad_input = grad_output.scatter(dim, index, 0)`.
+/// The scalar value is not a differentiable input, so this node exposes only
+/// the original input tensor to autograd.
+#[derive(Debug)]
+pub(crate) struct ScatterValueBackward<T: Float> {
+    pub input: Tensor<T>,
+    pub dim: usize,
+    pub index: Vec<usize>,
+    pub index_shape: Vec<usize>,
+}
+
+impl<T: Float> GradFn<T> for ScatterValueBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+
+        let grad_input = if self.input.requires_grad() {
+            let zero = <T as num_traits::Zero>::zero();
+            Some(no_grad(|| {
+                crate::ops::indexing::scatter_value(
+                    grad_output,
+                    self.dim as isize,
+                    &self.index,
+                    &self.index_shape,
+                    zero,
+                )
+            })?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "ScatterValueBackward"
     }
 }
 
