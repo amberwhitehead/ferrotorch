@@ -965,18 +965,6 @@ kind = "permanent"
 reason = "Implicit coverage: l2_norm_f32_torch is bit-exact verified against the live-torch f32 oracle by the simd_reduce.rs #[cfg(test)] unit tests (matches_torch_len1, empty_is_zero, boundary_decision_does_not_clip, etc.) and the divergence_critic_1614_l2_residual_unpinned.rs probe; the surface gate only scans tests/conformance_*.rs so the src-side unit tests are invisible to it. Promote to a conformance_*.rs reference when the simd_reduce conformance lane lands."
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::IndexSelectDimBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Autograd grad_fn for index_select_dim (N-D gather along arbitrary axis)."
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::indexing::index_select_dim"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Forward helper that constructs IndexSelectDimBackward; non-test consumer is RandomHorizontalFlip::apply in ferrotorch-data/src/transforms.rs."
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::shape::RollBackward <T>::new"
 kind = "permanent"
 reason = "Implicit coverage: constructor for RollBackward; invoked by Tensor::roll in ops/tensor_ops.rs when requires_grad. The RollBackward struct itself is covered via conformance_shape.rs; the gate's Type::method substring match doesn't catch RollBackward::new through the struct's existing coverage."
@@ -3006,12 +2994,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
-path = "ferrotorch_core::ops::phase2c::IntTensor <I>::index_select"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
 path = "ferrotorch_core::ops::phase2c::IntTensor <I>::to_float"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
@@ -3031,12 +3013,6 @@ tracking_issue = "#1915"
 
 [[exclusion]]
 path = "ferrotorch_core::ops::phase2c::Tensor <T>::gather"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
-tracking_issue = "#1915"
-
-[[exclusion]]
-path = "ferrotorch_core::ops::phase2c::Tensor <T>::index_select"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). (Historical note: the entry previously claimed transitive coverage via its containing type's integration tests; that claim is not machine-verified — several such methods never appear in the phase suite — so the entry is classified deferred.)"
 tracking_issue = "#1915"

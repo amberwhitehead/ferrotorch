@@ -1527,11 +1527,23 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
         }
 
         let input_shape = self.input.shape();
+        let effective_input_shape: Vec<usize> = if input_shape.is_empty() {
+            vec![1]
+        } else {
+            input_shape.to_vec()
+        };
         let input_numel: usize = crate::shape::numel(input_shape);
         let dim = self.dim;
-        let outer: usize = crate::shape::numel(&input_shape[..dim]);
-        let inner: usize = crate::shape::numel(&input_shape[dim + 1..]);
-        let in_dim_size = input_shape[dim];
+        if dim >= effective_input_shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "IndexSelectDimBackward: dim {dim} out of range for input shape {input_shape:?}"
+                ),
+            });
+        }
+        let outer: usize = crate::shape::numel(&effective_input_shape[..dim]);
+        let inner: usize = crate::shape::numel(&effective_input_shape[dim + 1..]);
+        let in_dim_size = effective_input_shape[dim];
         let out_dim_size = self
             .indices_cuda
             .as_ref()
@@ -1697,14 +1709,23 @@ pub fn index_select_dim<T: Float, I: IntElement>(
 ) -> FerrotorchResult<Tensor<T>> {
     let input_shape = input.shape();
     let ndim = input_shape.len();
-    if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "index_select_dim: input must have at least 1 dimension".into(),
-        });
-    }
-    if dim >= ndim {
+    let scalar_input = ndim == 0;
+    if scalar_input && dim != 0 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("index_select_dim: dim {dim} out of range for shape {input_shape:?}"),
+        });
+    }
+    if !scalar_input && dim >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("index_select_dim: dim {dim} out of range for shape {input_shape:?}"),
+        });
+    }
+    if scalar_input && indices.numel() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "index_select_dim(): Index to scalar can have only 1 value, got {} value(s)",
+                indices.numel()
+            ),
         });
     }
     if indices.ndim() > 1 {
@@ -1716,14 +1737,24 @@ pub fn index_select_dim<T: Float, I: IntElement>(
         });
     }
 
-    let in_dim_size = input_shape[dim];
+    let effective_input_shape: Vec<usize> = if scalar_input {
+        vec![1]
+    } else {
+        input_shape.to_vec()
+    };
+    let in_dim_size = effective_input_shape[dim];
 
     // Compute output: same shape but axis `dim` replaced by indices.numel().
-    let mut output_shape = input_shape.to_vec();
-    output_shape[dim] = indices.numel();
+    let output_shape = if scalar_input {
+        Vec::new()
+    } else {
+        let mut shape = input_shape.to_vec();
+        shape[dim] = indices.numel();
+        shape
+    };
 
-    let outer: usize = crate::shape::numel(&input_shape[..dim]);
-    let inner: usize = crate::shape::numel(&input_shape[dim + 1..]);
+    let outer: usize = crate::shape::numel(&effective_input_shape[..dim]);
+    let inner: usize = crate::shape::numel(&effective_input_shape[dim + 1..]);
     let out_dim_size = indices.numel();
 
     // GPU path: device-resident gather through `index_select_intidx`, which
@@ -1739,7 +1770,11 @@ pub fn index_select_dim<T: Float, I: IntElement>(
         }
         let input_c = input.contiguous()?;
         let (outer, in_dim_size, inner) = {
-            let shape = input_c.shape();
+            let shape: Vec<usize> = if input_c.shape().is_empty() {
+                vec![1]
+            } else {
+                input_c.shape().to_vec()
+            };
             (
                 crate::shape::numel(&shape[..dim]),
                 shape[dim],

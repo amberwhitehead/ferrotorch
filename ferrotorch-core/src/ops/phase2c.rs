@@ -352,6 +352,16 @@ fn normalize_gather_axis(axis: isize, input_ndim: usize) -> FerrotorchResult<usi
     normalize_axis(axis, input_ndim.max(1))
 }
 
+fn check_scalar_index_select_index_len(op: &str, len: usize) -> FerrotorchResult<()> {
+    if len == 1 {
+        Ok(())
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}(): Index to scalar can have only 1 value, got {len} value(s)"),
+        })
+    }
+}
+
 /// Read an `IntTensor<I>` index as host `Vec<i64>`. CPU references consume this
 /// directly. CUDA no-grad and integer paths validate resident indices on the
 /// GPU; tracked float CUDA forwards still use this to build the legacy
@@ -439,13 +449,23 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-        let d = normalize_axis(dim, self.ndim())?;
+        let scalar_input = self.ndim() == 0;
+        let d = normalize_axis(dim, self.ndim().max(1))?;
+        if scalar_input {
+            check_scalar_index_select_index_len("index_select", indices.numel())?;
+        }
         check_same_device(self.device(), indices.device(), "index_select")?;
         let input = self.contiguous()?;
-        let (outer, in_dim, inner) = factor(input.shape(), d);
+        let effective_shape = gather_effective_shape(input.shape());
+        let (outer, in_dim, inner) = factor(&effective_shape, d);
         let out_dim = indices.numel();
-        let mut out_shape = input.shape().to_vec();
-        out_shape[d] = out_dim;
+        let out_shape = if scalar_input {
+            Vec::new()
+        } else {
+            let mut shape = input.shape().to_vec();
+            shape[d] = out_dim;
+            shape
+        };
 
         if input.is_cuda() {
             let backend =
@@ -759,12 +779,22 @@ impl<I: IntElement> IntTensor<I> {
                 ),
             });
         }
-        let d = normalize_axis(dim, self.ndim())?;
+        let scalar_input = self.ndim() == 0;
+        let d = normalize_axis(dim, self.ndim().max(1))?;
+        if scalar_input {
+            check_scalar_index_select_index_len("index_select", indices.numel())?;
+        }
         check_same_device(self.device(), indices.device(), "index_select")?;
-        let (outer, in_dim, inner) = factor(self.shape(), d);
+        let effective_shape = gather_effective_shape(self.shape());
+        let (outer, in_dim, inner) = factor(&effective_shape, d);
         let out_dim = indices.numel();
-        let mut out_shape = self.shape().to_vec();
-        out_shape[d] = out_dim;
+        let out_shape = if scalar_input {
+            Vec::new()
+        } else {
+            let mut shape = self.shape().to_vec();
+            shape[d] = out_dim;
+            shape
+        };
 
         if self.is_cuda() {
             let backend =

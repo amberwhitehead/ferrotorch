@@ -66,8 +66,9 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::indexing::{
-    GatherBackward, IndexSelectBackward, MaskedFillBackward, ScatterAddBackward, ScatterBackward,
-    WhereCondBackward, index_select_1d, index_select_1d_it, masked_fill, masked_fill_bt,
+    GatherBackward, IndexSelectBackward, IndexSelectDimBackward, MaskedFillBackward,
+    ScatterAddBackward, ScatterBackward, WhereCondBackward, index_select_1d, index_select_1d_it,
+    index_select_dim, masked_fill, masked_fill_bt,
 };
 use ferrotorch_core::grad_fns::shape::{
     CatBackward, ExpandBackward, FlattenBackward, ReshapeBackward, SplitBackward, SqueezeBackward,
@@ -2319,6 +2320,92 @@ fn cpu_index_select_1d_via_int_tensor() {
     assert_eq!(got, vec![40.0, 10.0, 30.0]);
 }
 
+#[test]
+fn cpu_phase2c_tensor_index_select_scalar() {
+    let input = make_cpu_f32(&[5.0], &[], true);
+    let scalar_index = IntTensor::<i64>::from_vec(vec![0], vec![]).expect("scalar index");
+    let one_index = IntTensor::<i64>::from_vec(vec![0], vec![1]).expect("one index");
+
+    let scalar = input
+        .index_select(0, &scalar_index)
+        .expect("scalar index_select");
+    let one = input
+        .index_select(-1, &one_index)
+        .expect("one-element index_select");
+
+    assert_eq!(scalar.shape(), &[] as &[usize]);
+    assert_eq!(one.shape(), &[] as &[usize]);
+    check_f32(
+        "phase2c tensor index_select scalar fwd",
+        &read_back_f32(&one),
+        &[5.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    one.backward().expect("scalar index_select backward");
+    let grad = input.grad().unwrap().expect("scalar index_select grad");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    check_f32(
+        "phase2c tensor index_select scalar grad",
+        &read_back_f32(&grad),
+        &[1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let empty = IntTensor::<i64>::from_vec(Vec::new(), vec![0]).expect("empty index");
+    let two = IntTensor::<i64>::from_vec(vec![0, 0], vec![2]).expect("two index");
+    assert!(input.index_select(0, &empty).is_err());
+    assert!(input.index_select(0, &two).is_err());
+}
+
+#[test]
+fn cpu_phase2c_inttensor_index_select_scalar() {
+    let input = IntTensor::<i64>::from_vec(vec![5], vec![]).expect("scalar int tensor");
+    let scalar_index = IntTensor::<i64>::from_vec(vec![0], vec![]).expect("scalar index");
+    let one_index = IntTensor::<i64>::from_vec(vec![0], vec![1]).expect("one index");
+
+    let scalar = input
+        .index_select(0, &scalar_index)
+        .expect("scalar int index_select");
+    let one = input
+        .index_select(-1, &one_index)
+        .expect("one-element int index_select");
+
+    assert_eq!(scalar.shape(), &[] as &[usize]);
+    assert_eq!(one.shape(), &[] as &[usize]);
+    assert_eq!(one.data().unwrap(), &[5]);
+
+    let empty = IntTensor::<i64>::from_vec(Vec::new(), vec![0]).expect("empty index");
+    let two = IntTensor::<i64>::from_vec(vec![0, 0], vec![2]).expect("two index");
+    assert!(input.index_select(0, &empty).is_err());
+    assert!(input.index_select(0, &two).is_err());
+}
+
+#[test]
+fn cpu_index_select_dim_scalar() {
+    let input = make_cpu_f32(&[5.0], &[], true);
+    let index = IntTensor::<i64>::from_vec(vec![0], vec![1]).expect("one index");
+
+    let out = index_select_dim(&input, 0, &index).expect("scalar index_select_dim");
+    assert_eq!(out.shape(), &[] as &[usize]);
+    check_f32(
+        "index_select_dim scalar fwd",
+        &read_back_f32(&out),
+        &[5.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    out.backward().expect("index_select_dim scalar backward");
+    let grad = input.grad().unwrap().expect("index_select_dim scalar grad");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    check_f32(
+        "index_select_dim scalar grad",
+        &read_back_f32(&grad),
+        &[1.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
 fn run_masked_fill_for_device(device_label: &str, device: Device) {
     let file = load_fixtures();
     let cases = cases_for(&file, "masked_fill", device_label);
@@ -3261,6 +3348,12 @@ fn grad_fn_struct_paths_link() {
         input: leaf.clone(),
         indices: vec![0],
     };
+    let _isd = IndexSelectDimBackward::<f32> {
+        input: leaf.clone(),
+        dim: 0,
+        indices: vec![0],
+        indices_cuda: None,
+    };
     let _mf = MaskedFillBackward::<f32> {
         input: leaf.clone(),
         mask: BoolTensor::from_vec(vec![false], vec![1]).unwrap(),
@@ -3606,6 +3699,109 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_index_select_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_phase2c_index_select_scalar() {
+        ensure_cuda_backend();
+        let input = make_cpu_f32(&[5.0], &[], false)
+            .to(Device::Cuda(0))
+            .expect("upload")
+            .requires_grad_(true);
+        let index = IntTensor::<i64>::from_vec(vec![0], vec![1])
+            .expect("one index")
+            .to(Device::Cuda(0))
+            .expect("upload index");
+
+        let out = input
+            .index_select(0, &index)
+            .expect("CUDA scalar index_select");
+        assert_eq!(out.device(), Device::Cuda(0), "scalar index_select device");
+        assert_eq!(out.shape(), &[] as &[usize]);
+        check_f32(
+            "phase2c tensor index_select scalar cuda fwd",
+            &read_back_f32(&out),
+            &[5.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        out.backward().expect("CUDA scalar index_select backward");
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("CUDA scalar index_select grad");
+        assert_eq!(
+            grad.device(),
+            Device::Cuda(0),
+            "scalar index_select grad device"
+        );
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        check_f32(
+            "phase2c tensor index_select scalar cuda grad",
+            &read_back_f32(&grad),
+            &[1.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let int_input = IntTensor::<i64>::from_vec(vec![5], vec![])
+            .expect("scalar int tensor")
+            .to(Device::Cuda(0))
+            .expect("upload int tensor");
+        let int_out = int_input
+            .index_select(0, &index)
+            .expect("CUDA IntTensor scalar index_select");
+        assert!(
+            int_out.is_cuda(),
+            "IntTensor scalar index_select must stay CUDA-resident"
+        );
+        assert_eq!(int_out.shape(), &[] as &[usize]);
+        assert_eq!(int_out.to(Device::Cpu).unwrap().data().unwrap(), &[5]);
+    }
+
+    #[test]
+    fn gpu_index_select_dim_scalar() {
+        ensure_cuda_backend();
+        let input = make_cpu_f32(&[5.0], &[], false)
+            .to(Device::Cuda(0))
+            .expect("upload")
+            .requires_grad_(true);
+        let index = IntTensor::<i64>::from_vec(vec![0], vec![1])
+            .expect("one index")
+            .to(Device::Cuda(0))
+            .expect("upload index");
+
+        let out = index_select_dim(&input, 0, &index).expect("CUDA scalar index_select_dim");
+        assert_eq!(
+            out.device(),
+            Device::Cuda(0),
+            "scalar index_select_dim device"
+        );
+        assert_eq!(out.shape(), &[] as &[usize]);
+        check_f32(
+            "index_select_dim scalar cuda fwd",
+            &read_back_f32(&out),
+            &[5.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        out.backward()
+            .expect("CUDA scalar index_select_dim backward");
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("CUDA scalar index_select_dim grad");
+        assert_eq!(
+            grad.device(),
+            Device::Cuda(0),
+            "scalar index_select_dim grad device"
+        );
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        check_f32(
+            "index_select_dim scalar cuda grad",
+            &read_back_f32(&grad),
+            &[1.0],
+            tolerance::F32_BITEXACT,
+        );
     }
 
     #[test]

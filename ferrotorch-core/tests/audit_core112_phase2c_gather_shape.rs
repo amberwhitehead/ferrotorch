@@ -120,6 +120,61 @@ fn phase2c_tensor_gather_scalar_input_uses_nonempty_dim_contract() {
 }
 
 #[test]
+fn phase2c_tensor_index_select_scalar_input_matches_torch_contract() {
+    use ferrotorch_core::autograd::graph::backward;
+
+    let input = Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32]), vec![], false)
+        .unwrap()
+        .requires_grad_(true);
+    let scalar_index = IntTensor::from_vec(vec![0_i64], vec![]).unwrap();
+    let one_element_index = IntTensor::from_vec(vec![0_i64], vec![1]).unwrap();
+
+    let scalar = input.index_select(0, &scalar_index).unwrap();
+    let one_element = input.index_select(-1, &one_element_index).unwrap();
+
+    assert_eq!(scalar.shape(), &[] as &[usize]);
+    assert_eq!(scalar.data().unwrap(), &[5.0]);
+    assert_eq!(one_element.shape(), &[] as &[usize]);
+    assert_eq!(one_element.data().unwrap(), &[5.0]);
+
+    backward(&one_element).unwrap();
+    let grad = input
+        .grad()
+        .unwrap()
+        .expect("scalar index_select must accumulate scalar grad");
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    assert_eq!(grad.data().unwrap(), &[1.0]);
+}
+
+#[test]
+fn phase2c_inttensor_index_select_scalar_input_matches_torch_contract() {
+    let input = IntTensor::from_vec(vec![5_i64], vec![]).unwrap();
+    let scalar_index = IntTensor::from_vec(vec![0_i64], vec![]).unwrap();
+    let one_element_index = IntTensor::from_vec(vec![0_i64], vec![1]).unwrap();
+
+    let scalar = input.index_select(0, &scalar_index).unwrap();
+    let one_element = input.index_select(-1, &one_element_index).unwrap();
+
+    assert_eq!(scalar.shape(), &[] as &[usize]);
+    assert_eq!(scalar.data().unwrap(), &[5]);
+    assert_eq!(one_element.shape(), &[] as &[usize]);
+    assert_eq!(one_element.data().unwrap(), &[5]);
+}
+
+#[test]
+fn phase2c_index_select_scalar_input_rejects_non_singleton_index_like_torch() {
+    let input = Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32]), vec![], false).unwrap();
+    let int_input = IntTensor::from_vec(vec![5_i64], vec![]).unwrap();
+    let empty = IntTensor::<i64>::from_vec(Vec::new(), vec![0]).unwrap();
+    let two = IntTensor::from_vec(vec![0_i64, 0], vec![2]).unwrap();
+
+    assert!(input.index_select(0, &empty).is_err());
+    assert!(input.index_select(0, &two).is_err());
+    assert!(int_input.index_select(0, &empty).is_err());
+    assert!(int_input.index_select(0, &two).is_err());
+}
+
+#[test]
 fn phase2c_tensor_gather_empty_tracked_backward_is_zero() {
     use ferrotorch_core::autograd::graph::backward;
 
@@ -194,6 +249,71 @@ fn phase2c_tensor_gather_cuda_empty_index_returns_empty_cuda() {
     assert!(out.is_cuda(), "empty gather result must stay CUDA-resident");
     assert_eq!(out.shape(), &[999, 0]);
     assert!(out.to(Device::Cpu).unwrap().data().unwrap().is_empty());
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn phase2c_tensor_index_select_cuda_scalar_input_stays_resident() {
+    use ferrotorch_core::autograd::graph::backward;
+    use ferrotorch_core::device::Device;
+
+    ensure_cuda_backend();
+    let input = Tensor::from_storage(TensorStorage::cpu(vec![5.0_f32]), vec![], false)
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap()
+        .requires_grad_(true);
+    let index = IntTensor::from_vec(vec![0_i64], vec![1])
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap();
+
+    let out = input
+        .index_select(0, &index)
+        .expect("CUDA scalar index_select must match torch");
+
+    assert!(
+        out.is_cuda(),
+        "scalar index_select output must stay CUDA-resident"
+    );
+    assert_eq!(out.shape(), &[] as &[usize]);
+    assert_eq!(out.to(Device::Cpu).unwrap().data().unwrap(), &[5.0]);
+
+    backward(&out).unwrap();
+    let grad = input.grad().unwrap().expect("scalar CUDA grad");
+    assert!(
+        grad.is_cuda(),
+        "scalar index_select backward must stay CUDA-resident"
+    );
+    assert_eq!(grad.shape(), &[] as &[usize]);
+    assert_eq!(grad.to(Device::Cpu).unwrap().data().unwrap(), &[1.0]);
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn phase2c_inttensor_index_select_cuda_scalar_input_stays_resident() {
+    use ferrotorch_core::device::Device;
+
+    ensure_cuda_backend();
+    let input = IntTensor::from_vec(vec![5_i64], vec![])
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap();
+    let index = IntTensor::from_vec(vec![0_i64], vec![1])
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap();
+
+    let out = input
+        .index_select(0, &index)
+        .expect("CUDA IntTensor scalar index_select must match torch");
+
+    assert!(
+        out.is_cuda(),
+        "IntTensor scalar index_select output must stay CUDA-resident"
+    );
+    assert_eq!(out.shape(), &[] as &[usize]);
+    assert_eq!(out.to(Device::Cpu).unwrap().data().unwrap(), &[5]);
 }
 
 #[cfg(feature = "gpu")]
