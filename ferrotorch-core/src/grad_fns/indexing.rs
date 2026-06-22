@@ -939,34 +939,207 @@ pub struct ScatterBackward<T: Float> {
     pub index_shape: Vec<usize>,
 }
 
+#[inline]
+fn scatter_effective_shape(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        vec![1]
+    } else {
+        shape.to_vec()
+    }
+}
+
+fn scatter_index_numel(index_shape: &[usize], op: &'static str) -> FerrotorchResult<usize> {
+    crate::shape::checked_numel(index_shape, op)
+}
+
+fn validate_scatter_backward_layout<T: Float>(
+    op: &'static str,
+    input: &Tensor<T>,
+    src: &Tensor<T>,
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    grad_output: &Tensor<T>,
+) -> FerrotorchResult<(Vec<usize>, Vec<usize>, usize)> {
+    if grad_output.shape() != input.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: grad_output shape {:?} does not match input/output shape {:?}",
+                grad_output.shape(),
+                input.shape()
+            ),
+        });
+    }
+    if grad_output.device() != input.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: grad_output.device(),
+        });
+    }
+    if src.requires_grad() && src.device() != input.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: src.device(),
+        });
+    }
+
+    let effective_input_shape = scatter_effective_shape(input.shape());
+    let effective_index_shape = scatter_effective_shape(index_shape);
+    if dim >= effective_input_shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: dim {dim} out of range for effective input ndim {}",
+                effective_input_shape.len()
+            ),
+        });
+    }
+
+    let index_numel = scatter_index_numel(index_shape, op)?;
+    if index.len() != index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: saved index length {} does not match saved index_shape {:?} numel {}",
+                index.len(),
+                index_shape,
+                index_numel
+            ),
+        });
+    }
+
+    if index_numel != 0 {
+        if effective_index_shape.len() != effective_input_shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: index ndim {} does not match effective input ndim {}",
+                    effective_index_shape.len(),
+                    effective_input_shape.len()
+                ),
+            });
+        }
+        for (axis, (&index_dim, &input_dim)) in effective_index_shape
+            .iter()
+            .zip(&effective_input_shape)
+            .enumerate()
+        {
+            if axis != dim && index_dim > input_dim {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "{op}: index dim {axis} size {index_dim} exceeds input size {input_dim}"
+                    ),
+                });
+            }
+        }
+        for &idx in index {
+            if idx >= effective_input_shape[dim] {
+                return Err(FerrotorchError::IndexOutOfBounds {
+                    index: idx,
+                    axis: dim,
+                    size: effective_input_shape[dim],
+                });
+            }
+        }
+    }
+
+    Ok((effective_input_shape, effective_index_shape, index_numel))
+}
+
+fn scatter_src_shape_error(
+    op: &'static str,
+    backward_name: &'static str,
+    src_shape: &[usize],
+    index_shape: &[usize],
+) -> FerrotorchError {
+    FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op} backward: gradient for src is only defined when src.shape \
+             ({src_shape:?}) is compatible with index.shape ({index_shape:?}); PyTorch \
+             raises here too when {backward_name} returns an incompatible gradient"
+        ),
+    }
+}
+
+fn scatter_empty_src_grad<T: Float>(
+    op: &'static str,
+    backward_name: &'static str,
+    src: &Tensor<T>,
+    index_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    if src.shape() == index_shape {
+        return crate::creation::zeros_like(src);
+    }
+    let broadcast = crate::shape::broadcast_shapes(src.shape(), index_shape)
+        .map_err(|_| scatter_src_shape_error(op, backward_name, src.shape(), index_shape))?;
+    if broadcast == index_shape {
+        crate::creation::zeros_like(src)
+    } else {
+        Err(scatter_src_shape_error(
+            op,
+            backward_name,
+            src.shape(),
+            index_shape,
+        ))
+    }
+}
+
+fn validate_scatter_src_grad_shape<T: Float>(
+    op: &'static str,
+    backward_name: &'static str,
+    src: &Tensor<T>,
+    index_shape: &[usize],
+) -> FerrotorchResult<()> {
+    let effective_index_shape = scatter_effective_shape(index_shape);
+    let scalar_src_compatible = effective_index_shape.len() == 1 && effective_index_shape[0] <= 1;
+    if src.shape() == index_shape || (src.shape().is_empty() && scalar_src_compatible) {
+        Ok(())
+    } else {
+        Err(scatter_src_shape_error(
+            op,
+            backward_name,
+            src.shape(),
+            index_shape,
+        ))
+    }
+}
+
+fn align_scatter_src_grad<T: Float>(
+    op: &'static str,
+    backward_name: &'static str,
+    grad_src: Tensor<T>,
+    src: &Tensor<T>,
+    index_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let effective_index_shape = scatter_effective_shape(index_shape);
+    let scalar_src_compatible = effective_index_shape.len() == 1 && effective_index_shape[0] <= 1;
+    if src.shape() == index_shape {
+        Ok(grad_src)
+    } else if src.shape().is_empty() && scalar_src_compatible {
+        crate::grad_fns::arithmetic::reduce_grad_to_shape(&grad_src, src.shape())
+    } else {
+        Err(scatter_src_shape_error(
+            op,
+            backward_name,
+            src.shape(),
+            index_shape,
+        ))
+    }
+}
+
 impl<T: Float> GradFn<T> for ScatterBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         if !is_grad_enabled() {
             return Ok(vec![None, None]);
         }
 
-        // CORE-127 (#1821): the src gradient (`grad.gather(dim, index)`) is
-        // index-shaped, so a per-axis-larger src has no scatter VJP. Live
-        // torch 2.11.0 raises at backward time ("Function ScatterBackward0
-        // returned an invalid gradient at index 1 - got [2, 4] but expected
-        // shape compatible with [2, 5]"); match that contract with a
-        // structured error instead of silently returning the index-shaped
-        // gradient. grad for `input` alone is well-defined and flows.
-        if self.src.requires_grad() && self.src.shape() != self.index_shape.as_slice() {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "scatter backward: gradient for src is only defined when src.shape \
-                     ({:?}) equals index.shape ({:?}); PyTorch raises here too \
-                     (ScatterBackward0 returns an index-shaped gradient the engine \
-                     rejects)",
-                    self.src.shape(),
-                    self.index_shape
-                ),
-            });
-        }
-
-        let input_shape = self.input.shape();
-        let index_numel: usize = crate::shape::numel(&self.index_shape);
+        let (effective_input_shape, effective_index_shape, index_numel) =
+            validate_scatter_backward_layout(
+                "ScatterBackward",
+                &self.input,
+                &self.src,
+                self.dim,
+                &self.index,
+                &self.index_shape,
+                grad_output,
+            )?;
 
         // §3 GPU-native path (#1822/#1823), dispatched on T::dtype() with the
         // forward index uploaded as i64 (no f32 offset/mask encoding):
@@ -976,61 +1149,63 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
         //       uploaded f32 write-mask + masked_zero_f32.
         //   grad_src   = gather_nd(grad_output, index)
         //     — gathers from the positions that scatter wrote into
-        //       (src.shape == index.shape is guaranteed by the CORE-127
-        //       contract check above).
+        //       and reduces to scalar when PyTorch permits scalar tensor src.
         if grad_output.is_cuda() {
             let dt = T::dtype();
-            let ordinal = match grad_output.device() {
-                Device::Cuda(o) => o,
-                _ => unreachable!(),
-            };
+            if !matches!(dt, DType::F32 | DType::F64 | DType::F16 | DType::BF16) {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "ScatterBackward",
+                });
+            }
+            let ordinal = cuda_ordinal(grad_output.device(), "ScatterBackward")?;
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
-            let go_handle = grad_output.gpu_handle()?;
+            let grad_output = grad_output.contiguous()?;
 
             let grad_input = if self.input.requires_grad() {
-                let result_h = match dt {
-                    DType::F32 => backend.scatter_value_nd_f32(
-                        go_handle,
-                        &idx_handle,
-                        0.0,
-                        input_shape,
-                        &self.index_shape,
-                        self.dim,
-                    )?,
-                    DType::F64 => backend.scatter_value_nd_f64(
-                        go_handle,
-                        &idx_handle,
-                        0.0,
-                        input_shape,
-                        &self.index_shape,
-                        self.dim,
-                    )?,
-                    DType::F16 => backend.scatter_value_nd_f16(
-                        go_handle,
-                        &idx_handle,
-                        0.0,
-                        input_shape,
-                        &self.index_shape,
-                        self.dim,
-                    )?,
-                    DType::BF16 => backend.scatter_value_nd_bf16(
-                        go_handle,
-                        &idx_handle,
-                        0.0,
-                        input_shape,
-                        &self.index_shape,
-                        self.dim,
-                    )?,
-                    _ => {
-                        return Err(FerrotorchError::NotImplementedOnCuda {
-                            op: "ScatterBackward",
-                        });
+                let result_h = if index_numel == 0 {
+                    backend.clone_buffer(grad_output.gpu_handle()?)?
+                } else {
+                    let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+                    let go_handle = grad_output.gpu_handle()?;
+                    match dt {
+                        DType::F32 => backend.scatter_value_nd_f32(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            &effective_input_shape,
+                            &effective_index_shape,
+                            self.dim,
+                        )?,
+                        DType::F64 => backend.scatter_value_nd_f64(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            &effective_input_shape,
+                            &effective_index_shape,
+                            self.dim,
+                        )?,
+                        DType::F16 => backend.scatter_value_nd_f16(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            &effective_input_shape,
+                            &effective_index_shape,
+                            self.dim,
+                        )?,
+                        DType::BF16 => backend.scatter_value_nd_bf16(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            &effective_input_shape,
+                            &effective_index_shape,
+                            self.dim,
+                        )?,
+                        _ => unreachable!(),
                     }
                 };
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
-                    input_shape.to_vec(),
+                    self.input.shape().to_vec(),
                     false,
                 )?)
             } else {
@@ -1038,18 +1213,42 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
             };
 
             let grad_src = if self.src.requires_grad() {
-                let result_h = backend.gather_intidx_nd(
-                    go_handle,
-                    &idx_handle,
-                    input_shape,
-                    &self.index_shape,
-                    self.dim,
-                )?;
-                Some(Tensor::from_storage(
-                    TensorStorage::gpu(result_h),
-                    self.index_shape.clone(),
-                    false,
-                )?)
+                if index_numel == 0 {
+                    Some(scatter_empty_src_grad(
+                        "scatter",
+                        "ScatterBackward0",
+                        &self.src,
+                        &self.index_shape,
+                    )?)
+                } else {
+                    validate_scatter_src_grad_shape(
+                        "scatter",
+                        "ScatterBackward0",
+                        &self.src,
+                        &self.index_shape,
+                    )?;
+                    let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+                    let go_handle = grad_output.gpu_handle()?;
+                    let result_h = backend.gather_intidx_nd(
+                        go_handle,
+                        &idx_handle,
+                        &effective_input_shape,
+                        &effective_index_shape,
+                        self.dim,
+                    )?;
+                    let gathered = Tensor::from_storage(
+                        TensorStorage::gpu(result_h),
+                        self.index_shape.clone(),
+                        false,
+                    )?;
+                    Some(align_scatter_src_grad(
+                        "scatter",
+                        "ScatterBackward0",
+                        gathered,
+                        &self.src,
+                        &self.index_shape,
+                    )?)
+                }
             } else {
                 None
             };
@@ -1057,25 +1256,28 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
             return Ok(vec![grad_input, grad_src]);
         }
 
-        let ndim = input_shape.len();
+        let ndim = effective_input_shape.len();
         let go_data = grad_output.data_vec()?;
 
         // grad for input: grad_output with scattered positions zeroed.
         let grad_input = if self.input.requires_grad() {
             let mut gi = go_data.clone();
-            let mut coords = vec![0usize; ndim];
-            for i in 0..index_numel {
-                let idx_val = self.index[i];
-                let mut dst_coords = coords.clone();
-                dst_coords[self.dim] = idx_val;
-                let dst_flat = flat_index(&dst_coords, input_shape);
-                gi[dst_flat] = <T as num_traits::Zero>::zero();
+            if index_numel != 0 {
+                let mut coords = vec![0usize; ndim];
+                for i in 0..index_numel {
+                    let idx_val = self.index[i];
+                    let mut dst_coords = coords.clone();
+                    dst_coords[self.dim] = idx_val;
+                    let dst_flat = flat_index(&dst_coords, &effective_input_shape);
+                    gi[dst_flat] = <T as num_traits::Zero>::zero();
 
-                if i + 1 < index_numel {
-                    increment_coords(&mut coords, &self.index_shape);
+                    if i + 1 < index_numel {
+                        increment_coords(&mut coords, &effective_index_shape);
+                    }
                 }
             }
-            let t = Tensor::from_storage(TensorStorage::cpu(gi), input_shape.to_vec(), false)?;
+            let t =
+                Tensor::from_storage(TensorStorage::cpu(gi), self.input.shape().to_vec(), false)?;
             Some(t)
         } else {
             None
@@ -1083,21 +1285,45 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
 
         // grad for src: gather from grad_output at index positions.
         let grad_src = if self.src.requires_grad() {
+            if index_numel == 0 {
+                return Ok(vec![
+                    grad_input,
+                    Some(scatter_empty_src_grad(
+                        "scatter",
+                        "ScatterBackward0",
+                        &self.src,
+                        &self.index_shape,
+                    )?),
+                ]);
+            }
+            validate_scatter_src_grad_shape(
+                "scatter",
+                "ScatterBackward0",
+                &self.src,
+                &self.index_shape,
+            )?;
             let mut gs = vec![<T as num_traits::Zero>::zero(); index_numel];
             let mut coords = vec![0usize; ndim];
             for (i, gs_elem) in gs.iter_mut().enumerate() {
                 let idx_val = self.index[i];
                 let mut src_coords = coords.clone();
                 src_coords[self.dim] = idx_val;
-                let src_flat = flat_index(&src_coords, input_shape);
+                let src_flat = flat_index(&src_coords, &effective_input_shape);
                 *gs_elem = go_data[src_flat];
 
                 if i + 1 < index_numel {
-                    increment_coords(&mut coords, &self.index_shape);
+                    increment_coords(&mut coords, &effective_index_shape);
                 }
             }
-            let t = Tensor::from_storage(TensorStorage::cpu(gs), self.index_shape.clone(), false)?;
-            Some(t)
+            let gathered =
+                Tensor::from_storage(TensorStorage::cpu(gs), self.index_shape.clone(), false)?;
+            Some(align_scatter_src_grad(
+                "scatter",
+                "ScatterBackward0",
+                gathered,
+                &self.src,
+                &self.index_shape,
+            )?)
         } else {
             None
         };
@@ -1292,41 +1518,18 @@ fn validate_scatter_add_backward_layout<T: Float>(
     Ok((effective_input_shape, effective_index_shape, index_numel))
 }
 
-fn scatter_add_src_shape_error(src_shape: &[usize], index_shape: &[usize]) -> FerrotorchError {
-    FerrotorchError::InvalidArgument {
-        message: format!(
-            "scatter_add backward: gradient for src is only defined when src.shape \
-             ({src_shape:?}) is compatible with index.shape ({index_shape:?}); PyTorch \
-             raises here too when ScatterAddBackward0 returns an incompatible gradient"
-        ),
-    }
-}
-
 fn scatter_add_empty_src_grad<T: Float>(
     src: &Tensor<T>,
     index_shape: &[usize],
 ) -> FerrotorchResult<Tensor<T>> {
-    if src.shape() == index_shape {
-        return crate::creation::zeros_like(src);
-    }
-    let broadcast = crate::shape::broadcast_shapes(src.shape(), index_shape)
-        .map_err(|_| scatter_add_src_shape_error(src.shape(), index_shape))?;
-    if broadcast == index_shape {
-        crate::creation::zeros_like(src)
-    } else {
-        Err(scatter_add_src_shape_error(src.shape(), index_shape))
-    }
+    scatter_empty_src_grad("scatter_add", "ScatterAddBackward0", src, index_shape)
 }
 
 fn validate_scatter_add_src_grad_shape<T: Float>(
     src: &Tensor<T>,
     index_shape: &[usize],
 ) -> FerrotorchResult<()> {
-    if src.shape() == index_shape {
-        Ok(())
-    } else {
-        Err(scatter_add_src_shape_error(src.shape(), index_shape))
-    }
+    validate_scatter_src_grad_shape("scatter_add", "ScatterAddBackward0", src, index_shape)
 }
 
 impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
@@ -1350,8 +1553,8 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
         //     through unchanged; `clone_buffer` is dtype-agnostic).
         //   grad_src   = gather_nd(grad_output, index)  with the forward
         //     index uploaded as i64 — gathers the positions scatter_add
-        //     accumulated into (src.shape == index.shape guaranteed by the
-        //     CORE-127 contract check above).
+        //     accumulated into and reduces to scalar when PyTorch permits
+        //     scalar tensor src.
         if grad_output.is_cuda() {
             let dt = T::dtype();
             if !matches!(dt, DType::F32 | DType::F64 | DType::F16 | DType::BF16) {
@@ -1389,10 +1592,17 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
                         &effective_index_shape,
                         self.dim,
                     )?;
-                    Some(Tensor::from_storage(
+                    let gathered = Tensor::from_storage(
                         TensorStorage::gpu(result_h),
                         self.index_shape.clone(),
                         false,
+                    )?;
+                    Some(align_scatter_src_grad(
+                        "scatter_add",
+                        "ScatterAddBackward0",
+                        gathered,
+                        &self.src,
+                        &self.index_shape,
                     )?)
                 }
             } else {
@@ -1439,8 +1649,15 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
                     increment_coords(&mut coords, &effective_index_shape);
                 }
             }
-            let t = Tensor::from_storage(TensorStorage::cpu(gs), self.index_shape.clone(), false)?;
-            Some(t)
+            let gathered =
+                Tensor::from_storage(TensorStorage::cpu(gs), self.index_shape.clone(), false)?;
+            Some(align_scatter_src_grad(
+                "scatter_add",
+                "ScatterAddBackward0",
+                gathered,
+                &self.src,
+                &self.index_shape,
+            )?)
         } else {
             None
         };

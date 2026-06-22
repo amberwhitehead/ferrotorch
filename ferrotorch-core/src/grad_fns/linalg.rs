@@ -89,6 +89,27 @@ fn is_f16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::f16>()
 }
 
+#[inline]
+fn is_raw_linalg_packed<T: Float>(input: &Tensor<T>) -> bool {
+    input.is_contiguous() && input.storage_offset() == 0 && input.storage_len() == input.numel()
+}
+
+fn pack_for_raw_linalg<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if is_raw_linalg_packed(input) {
+        Ok(input.clone())
+    } else {
+        input.contiguous()
+    }
+}
+
+fn pack_for_raw_linalg_no_grad<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if is_raw_linalg_packed(input) {
+        Ok(input.clone())
+    } else {
+        crate::autograd::no_grad::no_grad(|| input.contiguous())
+    }
+}
+
 fn cuda_matmul_same_dtype<T: Float>(
     backend: &dyn GpuBackend,
     a: &GpuBufferHandle,
@@ -397,11 +418,13 @@ fn validate_linear_fused_operands<T: Float>(
 /// dA = grad_C @ B^T, dB = A^T @ grad_C — all on GPU, no CPU roundtrip.
 fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> GradPair<T> {
     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
     let go_h = grad_output.gpu_handle()?;
     let m = grad_output.shape()[0];
     let n = grad_output.shape()[1];
 
     let grad_a = if a.requires_grad() {
+        let b = pack_for_raw_linalg_no_grad(b)?;
         let k = b.shape()[0];
         let b_h = b.gpu_handle()?;
         let result_h = cuda_matmul_nt_same_dtype::<T>(backend, go_h, b_h, m, n, k, "MmBackward")?;
@@ -415,6 +438,7 @@ fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<
     };
 
     let grad_b = if b.requires_grad() {
+        let a = pack_for_raw_linalg_no_grad(a)?;
         let k = a.shape()[1];
         let a_h = a.gpu_handle()?;
         let at_h = cuda_transpose_2d_same_dtype::<T>(backend, a_h, m, k, "MmBackward")?;
@@ -463,12 +487,14 @@ impl<T: Float> GradFn<T> for MmBackward<T> {
         }
 
         // CPU path.
+        let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
         let grad_a = if self.a.requires_grad() {
+            let b = pack_for_raw_linalg_no_grad(&self.b)?;
             let gc_data = grad_output.data()?;
-            let b_data = self.b.data()?;
+            let b_data = b.data()?;
             let m = grad_output.shape()[0];
             let n = grad_output.shape()[1];
-            let k = self.b.shape()[0];
+            let k = b.shape()[0];
             let result = crate::ops::linalg::mm_raw_bt(gc_data, b_data, m, n, k);
             Some(Tensor::from_storage(
                 TensorStorage::cpu(result),
@@ -480,10 +506,11 @@ impl<T: Float> GradFn<T> for MmBackward<T> {
         };
 
         let grad_b = if self.b.requires_grad() {
-            let a_data = self.a.data()?;
+            let a = pack_for_raw_linalg_no_grad(&self.a)?;
+            let a_data = a.data()?;
             let gc_data = grad_output.data()?;
-            let m = self.a.shape()[0];
-            let k = self.a.shape()[1];
+            let m = a.shape()[0];
+            let k = a.shape()[1];
             let n = grad_output.shape()[1];
             let result = crate::ops::linalg::mm_raw_at(a_data, gc_data, k, m, n);
             Some(Tensor::from_storage(
@@ -537,10 +564,12 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let m = self.a.shape()[0];
             let k = self.a.shape()[1];
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
 
             let grad_a = if self.a.requires_grad() {
+                let x = pack_for_raw_linalg_no_grad(&self.x)?;
                 let go_h = grad_output.gpu_handle()?;
-                let x_h = self.x.gpu_handle()?;
+                let x_h = x.gpu_handle()?;
                 // outer(grad_y, x): treat grad_y as (m,1) and x as (1,k) → matmul gives (m,k).
                 let result_h =
                     cuda_matmul_same_dtype::<T>(backend, go_h, x_h, m, 1, k, "MvBackward")?;
@@ -554,7 +583,8 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
             };
 
             let grad_x = if self.x.requires_grad() {
-                let a_h = self.a.gpu_handle()?;
+                let a = pack_for_raw_linalg_no_grad(&self.a)?;
+                let a_h = a.gpu_handle()?;
                 let go_h = grad_output.gpu_handle()?;
                 // dx = A^T @ grad_y: transpose A (m,k) → (k,m), then multiply
                 // by grad_y treated as (m,1). The output storage is (k,1),
@@ -575,10 +605,12 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
         }
 
         // grad_output is shape (M,) — the upstream gradient on y.
+        let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
         let grad_a = if self.a.requires_grad() {
             // dA = outer(grad_y, x): shape (M, K)
+            let x = pack_for_raw_linalg_no_grad(&self.x)?;
             let grad_data = grad_output.data()?;
-            let x_data = self.x.data()?;
+            let x_data = x.data()?;
             let m = grad_data.len();
             let k = x_data.len();
             let mut outer = vec![<T as num_traits::Zero>::zero(); m * k];
@@ -598,8 +630,9 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
 
         let grad_x = if self.x.requires_grad() {
             // dx = A^T @ grad_y
-            let at = transpose(&self.a)?;
-            Some(linalg::mv(&at, grad_output)?)
+            let a = pack_for_raw_linalg_no_grad(&self.a)?;
+            let at = transpose(&a)?;
+            Some(linalg::mv(&at, &grad_output)?)
         } else {
             None
         };
@@ -643,11 +676,13 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
         // broadcast-multiply kernels so even scalar cotangents stay resident.
         if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
             let go_h = grad_output.gpu_handle()?;
             let scalar_shape: [usize; 0] = [];
 
             let grad_a = if self.a.requires_grad() {
-                let b_h = self.b.gpu_handle()?;
+                let b = pack_for_raw_linalg_no_grad(&self.b)?;
+                let b_h = b.gpu_handle()?;
                 let result_h = cuda_broadcast_mul_same_dtype::<T>(
                     backend,
                     go_h,
@@ -667,7 +702,8 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
             };
 
             let grad_b = if self.b.requires_grad() {
-                let a_h = self.a.gpu_handle()?;
+                let a = pack_for_raw_linalg_no_grad(&self.a)?;
+                let a_h = a.gpu_handle()?;
                 let result_h = cuda_broadcast_mul_same_dtype::<T>(
                     backend,
                     go_h,
@@ -692,7 +728,8 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
         let s = grad_output.item()?;
 
         let grad_a = if self.a.requires_grad() {
-            let b_data = self.b.data()?;
+            let b = pack_for_raw_linalg_no_grad(&self.b)?;
+            let b_data = b.data()?;
             let result: Vec<T> = b_data.iter().map(|&v| s * v).collect();
             Some(Tensor::from_storage(
                 TensorStorage::cpu(result),
@@ -704,7 +741,8 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
         };
 
         let grad_b = if self.b.requires_grad() {
-            let a_data = self.a.data()?;
+            let a = pack_for_raw_linalg_no_grad(&self.a)?;
+            let a_data = a.data()?;
             let result: Vec<T> = a_data.iter().map(|&v| s * v).collect();
             Some(Tensor::from_storage(
                 TensorStorage::cpu(result),
@@ -834,11 +872,13 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
                     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                     let k = self.a.numel();
                     let n = grad_output.numel();
+                    let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
 
                     let grad_a = if self.a.requires_grad() {
                         // da = B @ grad_y: treat grad_y as (1,N) and use the
                         // fused NT GEMM to produce contiguous (K,1) storage.
-                        let b_h = self.b.gpu_handle()?;
+                        let b = pack_for_raw_linalg_no_grad(&self.b)?;
+                        let b_h = b.gpu_handle()?;
                         let go_h = grad_output.gpu_handle()?;
                         let result_h = cuda_matmul_nt_same_dtype::<T>(
                             backend,
@@ -861,7 +901,8 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
                     let grad_b = if self.b.requires_grad() {
                         // dB = outer(a, grad_y): a (K,) × grad_y (N,) → (K,N).
                         // Compose as matmul((K,1), (1,N)) = rank-1 mm.
-                        let a_h = self.a.gpu_handle()?;
+                        let a = pack_for_raw_linalg_no_grad(&self.a)?;
+                        let a_h = a.gpu_handle()?;
                         let go_h = grad_output.gpu_handle()?;
                         let result_h = cuda_matmul_same_dtype::<T>(
                             backend,
@@ -1174,8 +1215,8 @@ pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchRe
     // be logically contiguous with offset 0 while still sharing a larger base
     // buffer; CUDA kernels receive only the raw handle and would see the base
     // length instead of the logical shape.
-    let a = a.contiguous()?;
-    let b = b.contiguous()?;
+    let a = pack_for_raw_linalg(a)?;
+    let b = pack_for_raw_linalg(b)?;
 
     if a.is_cuda() {
         let backend =
@@ -1252,13 +1293,15 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
         // attention and linear VJPs resident on CUDA; no CPU fallback here.
         if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
             let go_h = grad_output.gpu_handle()?;
             let m = grad_output.shape()[0];
             let n = grad_output.shape()[1];
 
             let grad_a = if self.a.requires_grad() {
+                let b = pack_for_raw_linalg_no_grad(&self.b)?;
                 let k = self.b.shape()[1];
-                let b_h = self.b.gpu_handle()?;
+                let b_h = b.gpu_handle()?;
                 let result_h =
                     cuda_matmul_same_dtype::<T>(backend, go_h, b_h, m, n, k, "MmBtBackward")?;
                 Some(Tensor::from_storage(
@@ -1271,8 +1314,9 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
             };
 
             let grad_b = if self.b.requires_grad() {
+                let a = pack_for_raw_linalg_no_grad(&self.a)?;
                 let k = self.a.shape()[1];
-                let a_h = self.a.gpu_handle()?;
+                let a_h = a.gpu_handle()?;
                 let got_h = cuda_transpose_2d_same_dtype::<T>(backend, go_h, m, n, "MmBtBackward")?;
                 let result_h =
                     cuda_matmul_same_dtype::<T>(backend, &got_h, a_h, n, m, k, "MmBtBackward")?;
@@ -1328,8 +1372,8 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
 /// Linear layer uses this: input @ weight^T where weight is (out, in).
 pub fn mm_bt_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let (m, k, n) = validate_mm_bt_operands("mm_bt", a, b)?;
-    let a = a.contiguous()?;
-    let b = b.contiguous()?;
+    let a = pack_for_raw_linalg(a)?;
+    let b = pack_for_raw_linalg(b)?;
 
     // GPU path: fused-transpose matmul. This is the natural layout for
     // attention `Q @ K^T` and linear weights `[out, in]`, and it avoids a
@@ -1393,11 +1437,13 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
         // GPU-native path for f32/f64/bf16/f16 tensors.
         if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
             let go_h = grad_output.gpu_handle()?;
 
             let grad_input = if self.input.requires_grad() {
+                let weight = pack_for_raw_linalg_no_grad(&self.weight)?;
                 let k = self.weight.shape()[1];
-                let w_h = self.weight.gpu_handle()?;
+                let w_h = weight.gpu_handle()?;
                 let result_h = cuda_matmul_same_dtype::<T>(
                     backend,
                     go_h,
@@ -1417,8 +1463,9 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
             };
 
             let grad_weight = if self.weight.requires_grad() {
+                let input = pack_for_raw_linalg_no_grad(&self.input)?;
                 let k = self.input.shape()[1];
-                let inp_h = self.input.gpu_handle()?;
+                let inp_h = input.gpu_handle()?;
                 let got_h =
                     cuda_transpose_2d_same_dtype::<T>(backend, go_h, m, n, "LinearFusedBackward")?;
                 let result_h = cuda_matmul_same_dtype::<T>(
@@ -1556,6 +1603,9 @@ pub fn linear_fused<T: Float>(
     bias: Option<&Tensor<T>>,
 ) -> FerrotorchResult<Tensor<T>> {
     let (m, k, n) = validate_linear_fused_operands(input, weight, bias)?;
+    let input = pack_for_raw_linalg(input)?;
+    let weight = pack_for_raw_linalg(weight)?;
+    let bias = bias.map(pack_for_raw_linalg).transpose()?;
 
     // GPU path: transpose weight, matmul, broadcast_add bias.
     if input.is_cuda() {
@@ -1590,7 +1640,7 @@ pub fn linear_fused<T: Float>(
             return Err(FerrotorchError::NotImplementedOnCuda { op: "linear_fused" });
         };
         // Add bias if present (dtype-aware).
-        if let Some(b) = bias {
+        if let Some(b) = bias.as_ref() {
             let out_shape = vec![m, n];
             let b_shape = vec![n];
             result_handle = cuda_broadcast_add_same_dtype::<T>(
@@ -1609,14 +1659,14 @@ pub fn linear_fused<T: Float>(
         let needs_grad = is_grad_enabled()
             && (input.requires_grad()
                 || weight.requires_grad()
-                || bias.is_some_and(|b| b.requires_grad()));
+                || bias.as_ref().is_some_and(|b| b.requires_grad()));
 
         return if needs_grad {
             let grad_fn = Arc::new(LinearFusedBackward {
                 input: input.clone(),
                 weight: weight.clone(),
                 has_bias: bias.is_some(),
-                bias: bias.cloned(),
+                bias: bias.clone(),
             });
             Tensor::from_operation(storage, shape, grad_fn)
         } else {
@@ -1629,7 +1679,7 @@ pub fn linear_fused<T: Float>(
     let mut result_vec = linalg::mm_raw_bt(a_data, w_data, m, k, n);
 
     // Fuse bias addition
-    if let Some(b) = bias {
+    if let Some(b) = bias.as_ref() {
         let b_data = b.data()?;
         for i in 0..m {
             let row = i * n;
@@ -1645,14 +1695,14 @@ pub fn linear_fused<T: Float>(
     let needs_grad = is_grad_enabled()
         && (input.requires_grad()
             || weight.requires_grad()
-            || bias.is_some_and(|b| b.requires_grad()));
+            || bias.as_ref().is_some_and(|b| b.requires_grad()));
 
     if needs_grad {
         let grad_fn = Arc::new(LinearFusedBackward {
             input: input.clone(),
             weight: weight.clone(),
             has_bias: bias.is_some(),
-            bias: bias.cloned(),
+            bias: bias.clone(),
         });
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
@@ -1662,8 +1712,10 @@ pub fn linear_fused<T: Float>(
 
 /// Differentiable matrix-vector multiply. Attaches `MvBackward` when needed.
 pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let needs_grad = is_grad_enabled() && (a.requires_grad() || x.requires_grad());
     let (m, k) = validate_mv_operands("mv", a, x)?;
+    let a = pack_for_raw_linalg(a)?;
+    let x = pack_for_raw_linalg(x)?;
+    let needs_grad = is_grad_enabled() && (a.requires_grad() || x.requires_grad());
 
     // GPU path (#817): route CUDA inputs through cuBLAS Sgemv/Dgemv. Pre-fix
     // the function unconditionally called `.data()?` and surfaced as
@@ -1673,18 +1725,6 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
         && a.device() == x.device()
         && let Some(backend) = gpu_backend()
     {
-        // Materialise non-contiguous views (e.g. permute/transpose) so the
-        // row-major-trick in cuBLAS sees contiguous strides.
-        let a = if a.is_contiguous() {
-            a.clone()
-        } else {
-            a.contiguous()?
-        };
-        let x = if x.is_contiguous() {
-            x.clone()
-        } else {
-            x.contiguous()?
-        };
         let handle = if is_f32::<T>() {
             backend.mv_f32(a.gpu_handle()?, x.gpu_handle()?, m, k)?
         } else if is_f64::<T>() {
@@ -1747,8 +1787,10 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
 
 /// Differentiable dot product. Attaches `DotBackward` when needed.
 pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let needs_grad = is_grad_enabled() && (a.requires_grad() || b.requires_grad());
     let n = validate_dot_operands("dot", a, b)?;
+    let a = pack_for_raw_linalg(a)?;
+    let b = pack_for_raw_linalg(b)?;
+    let needs_grad = is_grad_enabled() && (a.requires_grad() || b.requires_grad());
 
     // GPU path (#816): route CUDA inputs through cuBLAS Sdot/Ddot. Pre-fix
     // the function unconditionally called `.data()?` and surfaced as
@@ -1758,16 +1800,6 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
         && a.device() == b.device()
         && let Some(backend) = gpu_backend()
     {
-        let a = if a.is_contiguous() {
-            a.clone()
-        } else {
-            a.contiguous()?
-        };
-        let b = if b.is_contiguous() {
-            b.clone()
-        } else {
-            b.contiguous()?
-        };
         let handle = if is_f32::<T>() {
             backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
         } else if is_f64::<T>() {
@@ -1868,8 +1900,8 @@ pub fn matmul_differentiable<T: Float>(
     // Materialize to exact packed storage before linalg ops. This is needed
     // for CUDA raw-handle consumers even when shape/stride contiguity is true
     // but the tensor aliases a larger storage.
-    let a = a.contiguous()?;
-    let b = b.contiguous()?;
+    let a = pack_for_raw_linalg(a)?;
+    let b = pack_for_raw_linalg(b)?;
 
     // GPU dispatch for 1D x 2D vector-matrix product (#818). Pre-fix this
     // shape fell through to `linalg::matmul`, which calls `.data()?` and
@@ -2118,17 +2150,14 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
-    // Materialize non-contiguous views (e.g. from permute/transpose).
-    let a = if a.is_contiguous() {
-        a.clone()
-    } else {
-        a.contiguous()?
-    };
-    let b = if b.is_contiguous() {
-        b.clone()
-    } else {
-        b.contiguous()?
-    };
+    // Pack every non-whole-storage view before raw-kernel access. A row-narrowed
+    // CUDA tensor can be C-contiguous by strides while still carrying a nonzero
+    // storage_offset or oversized backing buffer; PyTorch kernels honor that
+    // offset, but ferrotorch GPU launchers receive only a raw handle. The public
+    // contiguous path cheap-clones only when offset==0 and storage_len==numel,
+    // otherwise it materializes on-device via strided_copy for CUDA float dtypes.
+    let a = pack_for_raw_linalg(a)?;
+    let b = pack_for_raw_linalg(b)?;
 
     let batch = a.shape()[0];
     let m = a.shape()[1];
@@ -2224,6 +2253,7 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
     if input.is_cuda()
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
+        let input = pack_for_raw_linalg(input)?;
         let handle = cuda_permute_0213_same_dtype::<T>(
             backend,
             input.gpu_handle()?,
@@ -2237,6 +2267,7 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
     }
 
     // CPU path.
+    let input = pack_for_raw_linalg(input)?;
     let data = input.data()?;
     let total = d0 * d1 * d2 * d3;
     let mut out = vec![<T as num_traits::Zero>::zero(); total];
@@ -5610,58 +5641,12 @@ pub fn vector_norm_differentiable<T: Float>(
 // Fused-affine family (#1344 / #1345): addmm / addmv / addr / addbmm /
 // baddbmm + structural autograd: kron / diagonal / diag / tril / triu.
 //
-// Each forward is computed directly from raw CPU data (the underlying
-// forward ops — `mm`, `mv`, `outer`, `bmm`, `tril`, `triu`, `diag`,
-// `diagonal` — are CPU-only and error on CUDA), and each backward is a
-// closed-form VJP grounded in a named PyTorch `file:line` and FD-verified in
-// `tests/divergence_linalg_fused_audit.rs`.
+// The fused-affine paths are composed from the same device-aware tensor
+// primitives PyTorch uses in derivatives.yaml (`mm`, `mv`, `bmm`,
+// broadcast/reduce, and scalar multiply) so CUDA inputs remain CUDA-resident.
+// The structural paths below still have their own specialised kernels or CPU
+// formulas as noted per op.
 // ===========================================================================
-
-/// Sum-reduce `grad` (shape `grad_shape`) back onto `target` shape, handling
-/// the numpy/PyTorch broadcast rules: leading dims present in `grad` but not
-/// in `target` are summed out, and any `target` dim that is size-1 while the
-/// corresponding `grad` dim is larger is summed with keepdim.
-///
-/// Used by the fused-affine `self`/bias gradient where op_db emits broadcast
-/// `self` shapes (`[]`, `[1]`, `[1,1]`, `[m]`, `[m,n]`) for `addmm`/`addmv`/
-/// `addr`/`addbmm`. Mirrors PyTorch's implicit `self` broadcast in
-/// `TORCH_META_FUNC(addmm)` (`aten/src/ATen/native/LinearAlgebra.cpp:194`),
-/// whose VJP `self: maybe_multiply(grad, beta)` is then reduced to `self`'s
-/// shape by the autograd engine's `sum_to`.
-fn reduce_grad_to_shape<T: Float>(grad: &[T], grad_shape: &[usize], target: &[usize]) -> Vec<T> {
-    if grad_shape == target {
-        return grad.to_vec();
-    }
-    let zero = <T as num_traits::Zero>::zero();
-    let target_size: usize = crate::shape::numel(target).max(1);
-    let mut out = vec![zero; target_size];
-
-    let grad_nd = grad_shape.len();
-    let target_nd = target.len();
-    let offset = grad_nd - target_nd;
-
-    let mut target_strides = vec![1usize; target_nd];
-    for i in (0..target_nd.saturating_sub(1)).rev() {
-        target_strides[i] = target_strides[i + 1] * target[i + 1];
-    }
-
-    let grad_total: usize = crate::shape::numel(grad_shape).max(1);
-    for (flat, &g) in grad.iter().enumerate().take(grad_total) {
-        let mut remaining = flat;
-        let mut tgt_flat = 0usize;
-        for d in (0..grad_nd).rev() {
-            let coord = remaining % grad_shape[d];
-            remaining /= grad_shape[d];
-            if d >= offset {
-                let td = d - offset;
-                let tc = if target[td] == 1 { 0 } else { coord };
-                tgt_flat += tc * target_strides[td];
-            }
-        }
-        out[tgt_flat] += g;
-    }
-    out
-}
 
 /// `out[i,j] = sum_k a[i,k] * b[k,j]` — plain CPU GEMM on raw slices.
 fn mm_rows<T: Float>(a: &[T], b: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
@@ -5679,13 +5664,86 @@ fn mm_at_rows<T: Float>(a: &[T], b: &[T], m: usize, k: usize, n: usize) -> Vec<T
 }
 
 #[inline]
-fn scale_vec<T: Float>(v: &[T], s: T) -> Vec<T> {
-    v.iter().map(|&x| s * x).collect()
-}
-
-#[inline]
 fn from_cpu<T: Float>(data: Vec<T>, shape: Vec<usize>) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::cpu(data), shape, false)
+}
+
+fn validate_bias_broadcast<T: Float>(
+    op: &'static str,
+    bias: &Tensor<T>,
+    target: &[usize],
+) -> FerrotorchResult<()> {
+    let shape = crate::shape::broadcast_shapes(bias.shape(), target)?;
+    if shape == target {
+        Ok(())
+    } else {
+        Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: self shape {:?} cannot broadcast exactly to output shape {target:?}",
+                bias.shape()
+            ),
+        })
+    }
+}
+
+fn scalar_tensor_like<T: Float>(
+    value: T,
+    like: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], like.device()).map_err(|err| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: failed to create scalar tensor on {:?}: {err}",
+                    like.device()
+                ),
+            }
+        })?,
+        vec![],
+        false,
+    )
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "Exact scalar-parameter sentinels mirror PyTorch's alpha/beta fast paths."
+)]
+fn scale_linalg_tensor<T: Float>(
+    tensor: &Tensor<T>,
+    value: T,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let one = <T as num_traits::One>::one();
+    if value == one {
+        return Ok(tensor.clone());
+    }
+    if value == -one {
+        return tensor.neg_t();
+    }
+    let scalar = scalar_tensor_like(value, tensor, op)?;
+    tensor.mul_t(&scalar)
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "Exact beta==0 sentinel matches PyTorch: validate shape but do not read self."
+)]
+fn affine_linalg_result<T: Float>(
+    op: &'static str,
+    bias: &Tensor<T>,
+    product: &Tensor<T>,
+    beta: T,
+    alpha: T,
+    out_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    validate_bias_broadcast(op, bias, out_shape)?;
+    let scaled_product = scale_linalg_tensor(product, alpha, op)?;
+    if beta == <T as num_traits::Zero>::zero() {
+        return Ok(scaled_product);
+    }
+    let scaled_bias = scale_linalg_tensor(bias, beta, op)?;
+    scaled_bias.add_t(&scaled_product)
 }
 
 // ---------------------------------------------------------------------------
@@ -5711,41 +5769,39 @@ pub struct AddmmBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for AddmmBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let m = grad_output.shape()[0];
-        let n = grad_output.shape()[1];
-        let g = grad_output.data()?;
+        crate::autograd::no_grad::no_grad(|| {
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
 
-        let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(g, self.beta);
-            Some(from_cpu(
-                reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
-                self.bias.shape().to_vec(),
-            )?)
-        } else {
-            None
-        };
+            let grad_bias = if self.bias.requires_grad() {
+                let scaled = scale_linalg_tensor(&grad_output, self.beta, "addmm backward")?;
+                Some(crate::grad_fns::arithmetic::reduce_grad_to_shape(
+                    &scaled,
+                    self.bias.shape(),
+                )?)
+            } else {
+                None
+            };
 
-        let grad_mat1 = if self.mat1.requires_grad() {
-            // d_mat1 = alpha * (grad @ mat2^T); mat2 is (k, n) so grad(m,n) @ mat2^T(n,k).
-            let k = self.mat1.shape()[1];
-            let m2 = self.mat2.data()?;
-            let prod = mm_bt_rows(g, m2, m, n, k);
-            Some(from_cpu(scale_vec(&prod, self.alpha), vec![m, k])?)
-        } else {
-            None
-        };
+            let grad_mat1 = if self.mat1.requires_grad() {
+                let mat2 = pack_for_raw_linalg_no_grad(&self.mat2)?;
+                let mat2_t = mat2.transpose(0, 1)?.contiguous()?;
+                let prod = mm_differentiable(&grad_output, &mat2_t)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addmm backward")?)
+            } else {
+                None
+            };
 
-        let grad_mat2 = if self.mat2.requires_grad() {
-            // d_mat2 = alpha * (mat1^T @ grad); mat1 is (m, k).
-            let k = self.mat1.shape()[1];
-            let m1 = self.mat1.data()?;
-            let prod = mm_at_rows(m1, g, k, m, n);
-            Some(from_cpu(scale_vec(&prod, self.alpha), vec![k, n])?)
-        } else {
-            None
-        };
+            let grad_mat2 = if self.mat2.requires_grad() {
+                let mat1 = pack_for_raw_linalg_no_grad(&self.mat1)?;
+                let mat1_t = mat1.transpose(0, 1)?.contiguous()?;
+                let prod = mm_differentiable(&mat1_t, &grad_output)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addmm backward")?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_bias, grad_mat1, grad_mat2])
+            Ok(vec![grad_bias, grad_mat1, grad_mat2])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5768,6 +5824,8 @@ pub fn addmm_differentiable<T: Float>(
     beta: T,
     alpha: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(bias, mat1)?;
+    ensure_same_device(mat1, mat2)?;
     if mat1.ndim() != 2 || mat2.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -5786,28 +5844,11 @@ pub fn addmm_differentiable<T: Float>(
     }
     let n = mat2.shape()[1];
 
-    let m1 = mat1.data()?;
-    let m2 = mat2.data()?;
-    let prod = mm_rows(m1, m2, m, k, n);
-
-    // out = beta*self_broadcast + alpha*prod.
-    // When beta == 0 the self/bias term is DROPPED entirely (never read), so
-    // nans/infs in self do not propagate — matches torch's
-    // `aten/src/ATen/native/cpu/BlasKernel.cpp:161-162` (`if (beta == 0) c = alpha*dot;`)
-    // and `aten/src/ATen/native/LinearAlgebra.cpp:1442` (self copied only when beta != 0).
-    let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    if beta == <T as num_traits::Zero>::zero() {
-        for i in 0..m * n {
-            out[i] = alpha * prod[i];
-        }
-    } else {
-        let bias_b = broadcast_data_to(bias, &[m, n])?;
-        for i in 0..m * n {
-            out[i] = beta * bias_b[i] + alpha * prod[i];
-        }
-    }
-    let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
+    let result = crate::autograd::no_grad::no_grad(|| {
+        let prod = mm_differentiable(mat1, mat2)?;
+        affine_linalg_result("addmm", bias, &prod, beta, alpha, &shape)
+    })?;
 
     if is_grad_enabled() && (bias.requires_grad() || mat1.requires_grad() || mat2.requires_grad()) {
         let grad_fn = Arc::new(AddmmBackward {
@@ -5817,63 +5858,11 @@ pub fn addmm_differentiable<T: Float>(
             beta,
             alpha,
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
-}
-
-/// Broadcast `t`'s data to `target` shape (numpy/PyTorch rules), returning a
-/// flat row-major `Vec`. Used by the fused-affine forwards to materialise the
-/// broadcast `self`/bias.
-fn broadcast_data_to<T: Float>(t: &Tensor<T>, target: &[usize]) -> FerrotorchResult<Vec<T>> {
-    let src = t.data()?;
-    let src_shape = t.shape();
-    if src_shape == target {
-        return Ok(src.to_vec());
-    }
-    let target_size: usize = crate::shape::numel(target).max(1);
-    let tnd = target.len();
-    let snd = src_shape.len();
-    if snd > tnd {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!("cannot broadcast {src_shape:?} to {target:?}"),
-        });
-    }
-    let offset = tnd - snd;
-    // Validate broadcast compatibility.
-    for (d, &s) in src_shape.iter().enumerate() {
-        let td = target[offset + d];
-        if s != td && s != 1 {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!("cannot broadcast {src_shape:?} to {target:?}"),
-            });
-        }
-    }
-    let mut src_strides = vec![1usize; snd];
-    for i in (0..snd.saturating_sub(1)).rev() {
-        src_strides[i] = src_strides[i + 1] * src_shape[i + 1];
-    }
-    let mut tgt_strides = vec![1usize; tnd];
-    for i in (0..tnd.saturating_sub(1)).rev() {
-        tgt_strides[i] = tgt_strides[i + 1] * target[i + 1];
-    }
-    let mut out = vec![<T as num_traits::Zero>::zero(); target_size];
-    for (flat, slot) in out.iter_mut().enumerate().take(target_size) {
-        let mut rem = flat;
-        let mut src_flat = 0usize;
-        for d in 0..tnd {
-            let coord = rem / tgt_strides[d];
-            rem %= tgt_strides[d];
-            if d >= offset {
-                let sd = d - offset;
-                let sc = if src_shape[sd] == 1 { 0 } else { coord };
-                src_flat += sc * src_strides[sd];
-            }
-        }
-        *slot = src[src_flat];
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -5897,52 +5886,41 @@ pub struct AddmvBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for AddmvBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let m = grad_output.shape()[0];
-        let g = grad_output.data()?;
-        let k = self.mat.shape()[1];
+        crate::autograd::no_grad::no_grad(|| {
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
+            let m = grad_output.shape()[0];
+            let k = self.mat.shape()[1];
 
-        let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(g, self.beta);
-            Some(from_cpu(
-                reduce_grad_to_shape(&scaled, &[m], self.bias.shape()),
-                self.bias.shape().to_vec(),
-            )?)
-        } else {
-            None
-        };
+            let grad_bias = if self.bias.requires_grad() {
+                let scaled = scale_linalg_tensor(&grad_output, self.beta, "addmv backward")?;
+                Some(crate::grad_fns::arithmetic::reduce_grad_to_shape(
+                    &scaled,
+                    self.bias.shape(),
+                )?)
+            } else {
+                None
+            };
 
-        let grad_mat = if self.mat.requires_grad() {
-            // d_mat = alpha * outer(grad, vec): (m, k) with out[i,j] = g[i]*vec[j].
-            let v = self.vec.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); m * k];
-            for i in 0..m {
-                let gi = self.alpha * g[i];
-                for j in 0..k {
-                    out[i * k + j] = gi * v[j];
-                }
-            }
-            Some(from_cpu(out, vec![m, k])?)
-        } else {
-            None
-        };
+            let grad_mat = if self.mat.requires_grad() {
+                let grad_col = grad_output.view_reshape(vec![m, 1])?;
+                let vec_row = self.vec.view_reshape(vec![1, k])?;
+                let outer = grad_col.mul_t(&vec_row)?;
+                Some(scale_linalg_tensor(&outer, self.alpha, "addmv backward")?)
+            } else {
+                None
+            };
 
-        let grad_vec = if self.vec.requires_grad() {
-            // d_vec = alpha * (mat^T @ grad): mat is (m, k); out[j] = sum_i mat[i,j]*g[i].
-            let mat = self.mat.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); k];
-            for i in 0..m {
-                let gi = g[i];
-                let row = i * k;
-                for j in 0..k {
-                    out[j] += mat[row + j] * gi;
-                }
-            }
-            Some(from_cpu(scale_vec(&out, self.alpha), vec![k])?)
-        } else {
-            None
-        };
+            let grad_vec = if self.vec.requires_grad() {
+                let mat = pack_for_raw_linalg_no_grad(&self.mat)?;
+                let mat_t = mat.transpose(0, 1)?.contiguous()?;
+                let prod = mv_differentiable(&mat_t, &grad_output)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addmv backward")?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_bias, grad_mat, grad_vec])
+            Ok(vec![grad_bias, grad_mat, grad_vec])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5964,6 +5942,8 @@ pub fn addmv_differentiable<T: Float>(
     beta: T,
     alpha: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(bias, mat)?;
+    ensure_same_device(mat, vec)?;
     if mat.ndim() != 2 || vec.ndim() != 1 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -5980,34 +5960,11 @@ pub fn addmv_differentiable<T: Float>(
             message: format!("addmv: {:?} @ {:?}", mat.shape(), vec.shape()),
         });
     }
-    let mat_d = mat.data()?;
-    let vec_d = vec.data()?;
-    let mut prod = vec![<T as num_traits::Zero>::zero(); m];
-    for (i, slot) in prod.iter_mut().enumerate() {
-        let mut acc = <T as num_traits::Zero>::zero();
-        let row = i * k;
-        for j in 0..k {
-            acc += mat_d[row + j] * vec_d[j];
-        }
-        *slot = acc;
-    }
-    // When beta == 0 the self term is DROPPED entirely (never read), so
-    // nans/infs in self do not propagate — matches torch's
-    // `aten/src/ATen/native/Blas.cpp:77-79,90` ("when beta==0, values in self
-    // should be ignored ... self copied only when betaval != 0.0").
-    let mut out = vec![<T as num_traits::Zero>::zero(); m];
-    if beta == <T as num_traits::Zero>::zero() {
-        for i in 0..m {
-            out[i] = alpha * prod[i];
-        }
-    } else {
-        let bias_b = broadcast_data_to(bias, &[m])?;
-        for i in 0..m {
-            out[i] = beta * bias_b[i] + alpha * prod[i];
-        }
-    }
-    let storage = TensorStorage::cpu(out);
     let shape = vec![m];
+    let result = crate::autograd::no_grad::no_grad(|| {
+        let prod = mv_differentiable(mat, vec)?;
+        affine_linalg_result("addmv", bias, &prod, beta, alpha, &shape)
+    })?;
 
     if is_grad_enabled() && (bias.requires_grad() || mat.requires_grad() || vec.requires_grad()) {
         let grad_fn = Arc::new(AddmvBackward {
@@ -6017,9 +5974,10 @@ pub fn addmv_differentiable<T: Float>(
             beta,
             alpha,
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
 }
 
@@ -6044,54 +6002,38 @@ pub struct AddrBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for AddrBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let m = grad_output.shape()[0];
-        let n = grad_output.shape()[1];
-        let g = grad_output.data()?;
+        crate::autograd::no_grad::no_grad(|| {
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
 
-        let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(g, self.beta);
-            Some(from_cpu(
-                reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
-                self.bias.shape().to_vec(),
-            )?)
-        } else {
-            None
-        };
+            let grad_bias = if self.bias.requires_grad() {
+                let scaled = scale_linalg_tensor(&grad_output, self.beta, "addr backward")?;
+                Some(crate::grad_fns::arithmetic::reduce_grad_to_shape(
+                    &scaled,
+                    self.bias.shape(),
+                )?)
+            } else {
+                None
+            };
 
-        let grad_vec1 = if self.vec1.requires_grad() {
-            // d_vec1 = alpha * (grad @ vec2): out[i] = sum_j grad[i,j]*vec2[j].
-            let v2 = self.vec2.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); m];
-            for i in 0..m {
-                let mut acc = <T as num_traits::Zero>::zero();
-                let row = i * n;
-                for j in 0..n {
-                    acc += g[row + j] * v2[j];
-                }
-                out[i] = self.alpha * acc;
-            }
-            Some(from_cpu(out, vec![m])?)
-        } else {
-            None
-        };
+            let grad_vec1 = if self.vec1.requires_grad() {
+                let vec2 = pack_for_raw_linalg_no_grad(&self.vec2)?;
+                let prod = mv_differentiable(&grad_output, &vec2)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addr backward")?)
+            } else {
+                None
+            };
 
-        let grad_vec2 = if self.vec2.requires_grad() {
-            // d_vec2 = alpha * (grad^T @ vec1): out[j] = sum_i grad[i,j]*vec1[i].
-            let v1 = self.vec1.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); n];
-            for i in 0..m {
-                let v1i = v1[i];
-                let row = i * n;
-                for j in 0..n {
-                    out[j] += g[row + j] * v1i;
-                }
-            }
-            Some(from_cpu(scale_vec(&out, self.alpha), vec![n])?)
-        } else {
-            None
-        };
+            let grad_vec2 = if self.vec2.requires_grad() {
+                let vec1 = pack_for_raw_linalg_no_grad(&self.vec1)?;
+                let grad_t = grad_output.transpose(0, 1)?.contiguous()?;
+                let prod = mv_differentiable(&grad_t, &vec1)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addr backward")?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_bias, grad_vec1, grad_vec2])
+            Ok(vec![grad_bias, grad_vec1, grad_vec2])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -6113,6 +6055,8 @@ pub fn addr_differentiable<T: Float>(
     beta: T,
     alpha: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(bias, vec1)?;
+    ensure_same_device(vec1, vec2)?;
     if vec1.ndim() != 1 || vec2.ndim() != 1 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -6124,34 +6068,13 @@ pub fn addr_differentiable<T: Float>(
     }
     let m = vec1.shape()[0];
     let n = vec2.shape()[0];
-    let v1 = vec1.data()?;
-    let v2 = vec2.data()?;
-    // When beta == 0 the self term is DROPPED entirely (never read), so
-    // nans/infs in self do not propagate — matches torch's
-    // `aten/src/ATen/native/cpu/LinearAlgebraKernel.cpp:53-55,60`
-    // ("when beta == 0, values in self should be ignored, nans and infs in self
-    // should not propagate" + `return alpha_val * vec1_val * vec2_val;`).
-    let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    if beta == <T as num_traits::Zero>::zero() {
-        for i in 0..m {
-            let av1 = alpha * v1[i];
-            let row = i * n;
-            for j in 0..n {
-                out[row + j] = av1 * v2[j];
-            }
-        }
-    } else {
-        let bias_b = broadcast_data_to(bias, &[m, n])?;
-        for i in 0..m {
-            let av1 = alpha * v1[i];
-            let row = i * n;
-            for j in 0..n {
-                out[row + j] = beta * bias_b[row + j] + av1 * v2[j];
-            }
-        }
-    }
-    let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
+    let result = crate::autograd::no_grad::no_grad(|| {
+        let col = vec1.view_reshape(vec![m, 1])?;
+        let row = vec2.view_reshape(vec![1, n])?;
+        let product = col.mul_t(&row)?;
+        affine_linalg_result("addr", bias, &product, beta, alpha, &shape)
+    })?;
 
     if is_grad_enabled() && (bias.requires_grad() || vec1.requires_grad() || vec2.requires_grad()) {
         let grad_fn = Arc::new(AddrBackward {
@@ -6161,9 +6084,10 @@ pub fn addr_differentiable<T: Float>(
             beta,
             alpha,
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
 }
 
@@ -6188,71 +6112,37 @@ pub struct BaddbmmBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for BaddbmmBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let bsz = grad_output.shape()[0];
-        let m = grad_output.shape()[1];
-        let n = grad_output.shape()[2];
-        let k = self.batch1.shape()[2];
-        let g = grad_output.data()?;
+        crate::autograd::no_grad::no_grad(|| {
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
 
-        let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(g, self.beta);
-            Some(from_cpu(
-                reduce_grad_to_shape(&scaled, &[bsz, m, n], self.bias.shape()),
-                self.bias.shape().to_vec(),
-            )?)
-        } else {
-            None
-        };
+            let grad_bias = if self.bias.requires_grad() {
+                let scaled = scale_linalg_tensor(&grad_output, self.beta, "baddbmm backward")?;
+                Some(crate::grad_fns::arithmetic::reduce_grad_to_shape(
+                    &scaled,
+                    self.bias.shape(),
+                )?)
+            } else {
+                None
+            };
 
-        let grad_b1 = if self.batch1.requires_grad() {
-            let b2 = self.batch2.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); bsz * m * k];
-            for bi in 0..bsz {
-                let g_off = bi * m * n;
-                let b2_off = bi * k * n;
-                let o_off = bi * m * k;
-                // d_b1[b] = alpha * (grad[b] @ batch2[b]^T): grad(m,n) @ b2(k,n)^T.
-                let slab = mm_bt_rows(
-                    &g[g_off..g_off + m * n],
-                    &b2[b2_off..b2_off + k * n],
-                    m,
-                    n,
-                    k,
-                );
-                for (i, &v) in slab.iter().enumerate() {
-                    out[o_off + i] = self.alpha * v;
-                }
-            }
-            Some(from_cpu(out, vec![bsz, m, k])?)
-        } else {
-            None
-        };
+            let grad_b1 = if self.batch1.requires_grad() {
+                let b2_t = batch_transpose(&self.batch2)?;
+                let prod = bmm(&grad_output, &b2_t)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "baddbmm backward")?)
+            } else {
+                None
+            };
 
-        let grad_b2 = if self.batch2.requires_grad() {
-            let b1 = self.batch1.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); bsz * k * n];
-            for bi in 0..bsz {
-                let g_off = bi * m * n;
-                let b1_off = bi * m * k;
-                let o_off = bi * k * n;
-                // d_b2[b] = alpha * (batch1[b]^T @ grad[b]): b1(m,k)^T @ grad(m,n).
-                let slab = mm_at_rows(
-                    &b1[b1_off..b1_off + m * k],
-                    &g[g_off..g_off + m * n],
-                    k,
-                    m,
-                    n,
-                );
-                for (i, &v) in slab.iter().enumerate() {
-                    out[o_off + i] = self.alpha * v;
-                }
-            }
-            Some(from_cpu(out, vec![bsz, k, n])?)
-        } else {
-            None
-        };
+            let grad_b2 = if self.batch2.requires_grad() {
+                let b1_t = batch_transpose(&self.batch1)?;
+                let prod = bmm(&b1_t, &grad_output)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "baddbmm backward")?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_bias, grad_b1, grad_b2])
+            Ok(vec![grad_bias, grad_b1, grad_b2])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -6274,6 +6164,8 @@ pub fn baddbmm_differentiable<T: Float>(
     beta: T,
     alpha: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(bias, batch1)?;
+    ensure_same_device(batch1, batch2)?;
     if batch1.ndim() != 3 || batch2.ndim() != 3 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -6292,39 +6184,11 @@ pub fn baddbmm_differentiable<T: Float>(
             message: format!("baddbmm: {:?} @ {:?}", batch1.shape(), batch2.shape()),
         });
     }
-    let b1 = batch1.data()?;
-    let b2 = batch2.data()?;
-    let mut prod = vec![<T as num_traits::Zero>::zero(); bsz * m * n];
-    for bi in 0..bsz {
-        let a_off = bi * m * k;
-        let b_off = bi * k * n;
-        let c_off = bi * m * n;
-        let slab = mm_rows(
-            &b1[a_off..a_off + m * k],
-            &b2[b_off..b_off + k * n],
-            m,
-            k,
-            n,
-        );
-        prod[c_off..c_off + m * n].copy_from_slice(&slab);
-    }
-    // When beta == 0 the self term is DROPPED entirely (never read), so
-    // nans/infs in self do not propagate — matches torch's
-    // `aten/src/ATen/native/LinearAlgebra.cpp:1682-1684`
-    // ("For beta == 0, the r's value will be ignored, especially for nan value.").
-    let mut out = vec![<T as num_traits::Zero>::zero(); bsz * m * n];
-    if beta == <T as num_traits::Zero>::zero() {
-        for i in 0..out.len() {
-            out[i] = alpha * prod[i];
-        }
-    } else {
-        let bias_b = broadcast_data_to(bias, &[bsz, m, n])?;
-        for i in 0..out.len() {
-            out[i] = beta * bias_b[i] + alpha * prod[i];
-        }
-    }
-    let storage = TensorStorage::cpu(out);
     let shape = vec![bsz, m, n];
+    let result = crate::autograd::no_grad::no_grad(|| {
+        let product = bmm(batch1, batch2)?;
+        affine_linalg_result("baddbmm", bias, &product, beta, alpha, &shape)
+    })?;
 
     if is_grad_enabled()
         && (bias.requires_grad() || batch1.requires_grad() || batch2.requires_grad())
@@ -6336,9 +6200,10 @@ pub fn baddbmm_differentiable<T: Float>(
             beta,
             alpha,
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
 }
 
@@ -6366,56 +6231,60 @@ pub struct AddbmmBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for AddbmmBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let m = grad_output.shape()[0];
-        let n = grad_output.shape()[1];
-        let bsz = self.batch1.shape()[0];
-        let k = self.batch1.shape()[2];
-        let g = grad_output.data()?;
+        crate::autograd::no_grad::no_grad(|| {
+            let grad_output = pack_for_raw_linalg_no_grad(grad_output)?;
+            let m = grad_output.shape()[0];
+            let n = grad_output.shape()[1];
+            let bsz = self.batch1.shape()[0];
 
-        let grad_bias = if self.bias.requires_grad() {
-            let scaled = scale_vec(g, self.beta);
-            Some(from_cpu(
-                reduce_grad_to_shape(&scaled, &[m, n], self.bias.shape()),
-                self.bias.shape().to_vec(),
-            )?)
-        } else {
-            None
-        };
+            let grad_bias = if self.bias.requires_grad() {
+                let scaled = scale_linalg_tensor(&grad_output, self.beta, "addbmm backward")?;
+                Some(crate::grad_fns::arithmetic::reduce_grad_to_shape(
+                    &scaled,
+                    self.bias.shape(),
+                )?)
+            } else {
+                None
+            };
 
-        let grad_b1 = if self.batch1.requires_grad() {
-            let b2 = self.batch2.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); bsz * m * k];
-            for bi in 0..bsz {
-                let b2_off = bi * k * n;
-                let o_off = bi * m * k;
-                // grad is shared (broadcast over batch): d_b1[b] = alpha*(grad @ b2[b]^T).
-                let slab = mm_bt_rows(g, &b2[b2_off..b2_off + k * n], m, n, k);
-                for (i, &v) in slab.iter().enumerate() {
-                    out[o_off + i] = self.alpha * v;
-                }
-            }
-            Some(from_cpu(out, vec![bsz, m, k])?)
-        } else {
-            None
-        };
+            let expanded_grad = (self.batch1.requires_grad() || self.batch2.requires_grad())
+                .then(|| {
+                    grad_output
+                        .view_reshape(vec![1, m, n])?
+                        .broadcast_to_t(&[bsz, m, n])
+                })
+                .transpose()?;
 
-        let grad_b2 = if self.batch2.requires_grad() {
-            let b1 = self.batch1.data()?;
-            let mut out = vec![<T as num_traits::Zero>::zero(); bsz * k * n];
-            for bi in 0..bsz {
-                let b1_off = bi * m * k;
-                let o_off = bi * k * n;
-                let slab = mm_at_rows(&b1[b1_off..b1_off + m * k], g, k, m, n);
-                for (i, &v) in slab.iter().enumerate() {
-                    out[o_off + i] = self.alpha * v;
-                }
-            }
-            Some(from_cpu(out, vec![bsz, k, n])?)
-        } else {
-            None
-        };
+            let grad_b1 = if self.batch1.requires_grad() {
+                let expanded_grad =
+                    expanded_grad
+                        .as_ref()
+                        .ok_or_else(|| FerrotorchError::InvalidArgument {
+                            message: "addbmm backward: missing expanded gradient".into(),
+                        })?;
+                let batch2_t = batch_transpose(&self.batch2)?;
+                let prod = bmm(expanded_grad, &batch2_t)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addbmm backward")?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_bias, grad_b1, grad_b2])
+            let grad_b2 = if self.batch2.requires_grad() {
+                let expanded_grad =
+                    expanded_grad
+                        .as_ref()
+                        .ok_or_else(|| FerrotorchError::InvalidArgument {
+                            message: "addbmm backward: missing expanded gradient".into(),
+                        })?;
+                let batch1_t = batch_transpose(&self.batch1)?;
+                let prod = bmm(&batch1_t, expanded_grad)?;
+                Some(scale_linalg_tensor(&prod, self.alpha, "addbmm backward")?)
+            } else {
+                None
+            };
+
+            Ok(vec![grad_bias, grad_b1, grad_b2])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -6437,6 +6306,8 @@ pub fn addbmm_differentiable<T: Float>(
     beta: T,
     alpha: T,
 ) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(bias, batch1)?;
+    ensure_same_device(batch1, batch2)?;
     if batch1.ndim() != 3 || batch2.ndim() != 3 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -6455,40 +6326,12 @@ pub fn addbmm_differentiable<T: Float>(
             message: format!("addbmm: {:?} @ {:?}", batch1.shape(), batch2.shape()),
         });
     }
-    let b1 = batch1.data()?;
-    let b2 = batch2.data()?;
-    let mut acc = vec![<T as num_traits::Zero>::zero(); m * n];
-    for bi in 0..bsz {
-        let a_off = bi * m * k;
-        let b_off = bi * k * n;
-        let slab = mm_rows(
-            &b1[a_off..a_off + m * k],
-            &b2[b_off..b_off + k * n],
-            m,
-            k,
-            n,
-        );
-        for (i, &v) in slab.iter().enumerate() {
-            acc[i] += v;
-        }
-    }
-    // When beta == 0 the self term is DROPPED entirely (never read), so
-    // nans/infs in self do not propagate — matches torch's
-    // `aten/src/ATen/native/LinearAlgebra.cpp:1682-1684`
-    // ("For beta == 0, the r's value will be ignored, especially for nan value.").
-    let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    if beta == <T as num_traits::Zero>::zero() {
-        for i in 0..m * n {
-            out[i] = alpha * acc[i];
-        }
-    } else {
-        let bias_b = broadcast_data_to(bias, &[m, n])?;
-        for i in 0..m * n {
-            out[i] = beta * bias_b[i] + alpha * acc[i];
-        }
-    }
-    let storage = TensorStorage::cpu(out);
     let shape = vec![m, n];
+    let result = crate::autograd::no_grad::no_grad(|| {
+        let product = bmm(batch1, batch2)?;
+        let summed = crate::grad_fns::reduction::sum_dim(&product, 0, false)?;
+        affine_linalg_result("addbmm", bias, &summed, beta, alpha, &shape)
+    })?;
 
     if is_grad_enabled()
         && (bias.requires_grad() || batch1.requires_grad() || batch2.requires_grad())
@@ -6500,9 +6343,10 @@ pub fn addbmm_differentiable<T: Float>(
             beta,
             alpha,
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
 }
 

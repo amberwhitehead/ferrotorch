@@ -23,8 +23,9 @@
 //!     ScatterBackward0 returned an invalid gradient at index 1 - got
 //!     [2, 4] but expected shape compatible with [2, 5]"
 //!     (same for ScatterAddBackward0). ferrotorch matches that oracle with a
-//!     structured error (R-ORACLE-4: one contract, no dual-accept). The
-//!     audit recommendation of a full-src-shaped zero-padded gradient was
+//!     structured error (R-ORACLE-4: one contract, no dual-accept), while
+//!     preserving PyTorch's scalar-src reduction and empty-index broadcast-zero
+//!     cases. The audit recommendation of a full-src-shaped zero-padded gradient was
 //!     checked against live torch and REJECTED: torch never produces such a
 //!     gradient.
 //!   - Backward grad for `input` alone is well-defined for a larger `src`
@@ -236,6 +237,96 @@ fn core127_cpu_scatter_equal_shape_grads_match_torch() {
     assert_eq!(gs.data_vec().unwrap(), vec![1.0; 8]);
 }
 
+/// Live torch 2.11.0+cu130:
+/// `torch.tensor(1., requires_grad=True).scatter(0, tensor([0]), tensor(2., requires_grad=True))`
+/// is legal and returns a scalar; backward gives `input.grad=0`, `src.grad=1`.
+#[test]
+fn core127_cpu_scatter_scalar_input_scalar_src_grad_matches_torch() {
+    let input = cpu_f32(&[1.0], &[], true);
+    let src = cpu_f32(&[2.0], &[], true);
+    let out = scatter(&input, 0, &[0], &[1], &src).unwrap();
+    assert!(
+        out.shape().is_empty(),
+        "scalar input must produce scalar output"
+    );
+    assert_eq!(out.data_vec().unwrap(), vec![2.0]);
+
+    backward(&out.sum_all().unwrap()).unwrap();
+    let gi = input.grad().unwrap().unwrap();
+    let gs = src.grad().unwrap().unwrap();
+    assert!(gs.shape().is_empty(), "scalar src grad must stay scalar");
+    assert_eq!(gi.data_vec().unwrap(), vec![0.0]);
+    assert_eq!(gs.data_vec().unwrap(), vec![1.0]);
+}
+
+/// Live torch accepts the forward (`index` is 0-D, `src` is shape [1]) but the
+/// derivative is index-shaped `[]`, so autograd raises an invalid-gradient
+/// error for `src`. ferrotorch should surface the same structured failure.
+#[test]
+fn core127_cpu_scatter_index0d_src_len1_grad_src_errs_like_torch() {
+    let input = cpu_f32(&[1.0], &[], true);
+    let src = cpu_f32(&[2.0], &[1], true);
+    let out = scatter(&input, 0, &[0], &[], &src).unwrap();
+    let r = backward(&out.sum_all().unwrap());
+    assert!(
+        matches!(r, Err(FerrotorchError::InvalidArgument { .. })),
+        "index-shaped [] grad is not compatible with src [1], got {r:?}"
+    );
+}
+
+/// Live torch: scalar tensor `src` is valid for `scatter_add` with one effective
+/// index element; `grad.gather(dim, index)` is reduced back to scalar `src.grad`.
+#[test]
+fn core127_cpu_scatter_add_scalar_src_grad_reduces_like_torch() {
+    let input = cpu_f32(&[1.0], &[1], true);
+    let src = cpu_f32(&[9.0], &[], true);
+    let out = scatter_add(&input, 0, &[0], &[1], &src).unwrap();
+    assert_eq!(out.data_vec().unwrap(), vec![10.0]);
+
+    backward(&out.sum_all().unwrap()).unwrap();
+    let gi = input.grad().unwrap().unwrap();
+    let gs = src.grad().unwrap().unwrap();
+    assert!(gs.shape().is_empty(), "scalar src grad must stay scalar");
+    assert_eq!(gi.data_vec().unwrap(), vec![1.0]);
+    assert_eq!(gs.data_vec().unwrap(), vec![1.0]);
+}
+
+/// `scatter_shape_check` returns immediately for an empty index. Backward still
+/// follows PyTorch's `src: grad.gather(dim, index)` contract: a grad of shape
+/// [0,3] reduces to zeros for broadcast-compatible src [1,3].
+#[test]
+fn core127_cpu_scatter_empty_index_broadcast_src_zero_grad_matches_torch() {
+    let input = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let src = cpu_f32(&[9.0, 10.0, 11.0], &[1, 3], true);
+    let out = scatter(&input, 0, &[], &[0, 3], &src).unwrap();
+    assert_eq!(out.data_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+    backward(&out.sum_all().unwrap()).unwrap();
+    assert_eq!(
+        input.grad().unwrap().unwrap().data_vec().unwrap(),
+        vec![1.0; 6]
+    );
+    let gs = src.grad().unwrap().unwrap();
+    assert_eq!(gs.shape(), &[1, 3]);
+    assert_eq!(gs.data_vec().unwrap(), vec![0.0, 0.0, 0.0]);
+}
+
+/// Scalar tensor src is not a blanket escape hatch: live torch rejects a
+/// non-empty rank-1 index with size 2 because `index.size(0) > ensure_nonempty_size(src, 0)`.
+#[test]
+fn core127_cpu_scalar_src_larger_nonempty_index_rejected_like_torch() {
+    let input = cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
+    let src = cpu_f32(&[9.0], &[], false);
+    assert_metadata_err(
+        scatter(&input, 0, &[0, 1], &[2], &src).map(|t| t.data_vec()),
+        "scatter scalar src index [2]",
+    );
+    assert_metadata_err(
+        scatter_add(&input, 0, &[0, 1], &[2], &src).map(|t| t.data_vec()),
+        "scatter_add scalar src index [2]",
+    );
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
@@ -338,5 +429,72 @@ mod gpu {
             g.cpu().unwrap().data_vec().unwrap(),
             vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
         );
+    }
+
+    #[test]
+    fn core127_cuda_scatter_scalar_input_scalar_src_grad_stays_resident() {
+        ensure_cuda_backend();
+        let input = cuda(cpu_f32(&[1.0], &[], false), true);
+        let src = cuda(cpu_f32(&[2.0], &[], false), true);
+        let out = scatter(&input, 0, &[0], &[1], &src).unwrap();
+        assert!(out.is_cuda(), "forward must stay CUDA-resident");
+        assert!(out.shape().is_empty());
+        assert_eq!(out.cpu().unwrap().data_vec().unwrap(), vec![2.0]);
+
+        backward(&out.sum_all().unwrap()).unwrap();
+        let gi = input.grad().unwrap().unwrap();
+        let gs = src.grad().unwrap().unwrap();
+        assert!(gi.is_cuda(), "input grad must stay CUDA-resident");
+        assert!(gs.is_cuda(), "scalar src grad must stay CUDA-resident");
+        assert!(gs.shape().is_empty());
+        assert_eq!(gi.cpu().unwrap().data_vec().unwrap(), vec![0.0]);
+        assert_eq!(gs.cpu().unwrap().data_vec().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn core127_cuda_scatter_add_scalar_src_grad_stays_resident() {
+        ensure_cuda_backend();
+        let input = cuda(cpu_f32(&[1.0], &[1], false), true);
+        let src = cuda(cpu_f32(&[9.0], &[], false), true);
+        let out = scatter_add(&input, 0, &[0], &[1], &src).unwrap();
+        assert!(out.is_cuda(), "forward must stay CUDA-resident");
+        assert_eq!(out.cpu().unwrap().data_vec().unwrap(), vec![10.0]);
+
+        backward(&out.sum_all().unwrap()).unwrap();
+        let gi = input.grad().unwrap().unwrap();
+        let gs = src.grad().unwrap().unwrap();
+        assert!(gi.is_cuda(), "input grad must stay CUDA-resident");
+        assert!(gs.is_cuda(), "scalar src grad must stay CUDA-resident");
+        assert!(gs.shape().is_empty());
+        assert_eq!(gi.cpu().unwrap().data_vec().unwrap(), vec![1.0]);
+        assert_eq!(gs.cpu().unwrap().data_vec().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn core127_cuda_scatter_empty_index_broadcast_src_zero_grad_stays_resident() {
+        ensure_cuda_backend();
+        let input = cuda(
+            cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false),
+            true,
+        );
+        let src = cuda(cpu_f32(&[9.0, 10.0, 11.0], &[1, 3], false), true);
+        let out = scatter(&input, 0, &[], &[0, 3], &src).unwrap();
+        assert!(out.is_cuda(), "empty-index forward must stay CUDA-resident");
+        assert_eq!(
+            out.cpu().unwrap().data_vec().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+
+        backward(&out.sum_all().unwrap()).unwrap();
+        let gi = input.grad().unwrap().unwrap();
+        let gs = src.grad().unwrap().unwrap();
+        assert!(gi.is_cuda(), "input grad must stay CUDA-resident");
+        assert!(
+            gs.is_cuda(),
+            "broadcast src zero-grad must stay CUDA-resident"
+        );
+        assert_eq!(gi.cpu().unwrap().data_vec().unwrap(), vec![1.0; 6]);
+        assert_eq!(gs.shape(), &[1, 3]);
+        assert_eq!(gs.cpu().unwrap().data_vec().unwrap(), vec![0.0, 0.0, 0.0]);
     }
 }
