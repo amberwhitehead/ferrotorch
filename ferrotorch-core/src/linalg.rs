@@ -4470,15 +4470,17 @@ pub fn baddbmm<T: Float>(
     crate::grad_fns::linalg::baddbmm_differentiable(self_, batch1, batch2, beta, alpha)
 }
 
-/// `kron(self, other)` — Kronecker product (2-D × 2-D here).
+/// `kron(self, other)` — Kronecker product.
 ///
 /// Mirrors `torch.kron`; upstream `Tensor kron(const Tensor& self, const
 /// Tensor& other)` in `aten/src/ATen/native/LinearAlgebra.cpp:3530`.
+/// Supports scalar and arbitrary-rank inputs by rank-padding the shorter input
+/// with leading singleton dimensions, then multiplying alternating views.
 ///
 /// # Backward
-/// Autograd-aware (CPU): delegates to
-/// `crate::grad_fns::linalg::kron_differentiable` (per-Kron-block VJP
-/// `dA = sum grad·B^T`, `dB = sum A^T·grad`).
+/// Autograd-aware on CPU and CUDA: delegates to
+/// `crate::grad_fns::linalg::kron_differentiable`, whose VJP is the adjoint of
+/// PyTorch's alternating-view multiply recipe.
 pub fn kron<T: Float>(self_: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     crate::grad_fns::linalg::kron_differentiable(self_, other)
 }

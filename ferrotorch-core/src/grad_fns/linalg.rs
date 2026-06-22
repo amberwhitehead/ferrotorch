@@ -6351,20 +6351,85 @@ pub fn addbmm_differentiable<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
-// KronBackward — K = kron(A, B)  (2D × 2D)
+// KronBackward — K = kron(A, B)
 // ---------------------------------------------------------------------------
 
-/// Backward for the 2-D Kronecker product `K = kron(A, B)`.
+#[derive(Debug, Clone)]
+struct KronMetadata {
+    max_dim: usize,
+    a_view_shape: Vec<usize>,
+    b_view_shape: Vec<usize>,
+    mul_shape: Vec<usize>,
+    result_shape: Vec<usize>,
+}
+
+fn kron_metadata(a_shape: &[usize], b_shape: &[usize]) -> FerrotorchResult<KronMetadata> {
+    let max_dim = a_shape.len().max(b_shape.len());
+    let a_pad = max_dim - a_shape.len();
+    let b_pad = max_dim - b_shape.len();
+    let mut a_view_shape = Vec::with_capacity(max_dim.saturating_mul(2));
+    let mut b_view_shape = Vec::with_capacity(max_dim.saturating_mul(2));
+    let mut mul_shape = Vec::with_capacity(max_dim.saturating_mul(2));
+    let mut result_shape = Vec::with_capacity(max_dim);
+
+    for i in 0..max_dim {
+        let a_dim = if i >= a_pad { a_shape[i - a_pad] } else { 1 };
+        let b_dim = if i >= b_pad { b_shape[i - b_pad] } else { 1 };
+        let out_dim = a_dim
+            .checked_mul(b_dim)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("kron: output dimension overflow at axis {i}: {a_dim} * {b_dim}"),
+            })?;
+
+        a_view_shape.push(a_dim);
+        a_view_shape.push(1);
+        b_view_shape.push(1);
+        b_view_shape.push(b_dim);
+        mul_shape.push(a_dim);
+        mul_shape.push(b_dim);
+        result_shape.push(out_dim);
+    }
+
+    Ok(KronMetadata {
+        max_dim,
+        a_view_shape,
+        b_view_shape,
+        mul_shape,
+        result_shape,
+    })
+}
+
+fn kron_forward_composite<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    ensure_same_device(a, b)?;
+    let meta = kron_metadata(a.shape(), b.shape())?;
+    let a_view = a.view_reshape(meta.a_view_shape)?;
+    let b_view = b.view_reshape(meta.b_view_shape)?;
+    let product = a_view.mul_t(&b_view)?;
+    product.view_reshape(meta.result_shape)
+}
+
+fn reduce_kron_grad<T: Float>(
+    weighted: &Tensor<T>,
+    dims: &[i64],
+    target_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let reduced = if dims.is_empty() {
+        weighted.clone()
+    } else {
+        crate::grad_fns::reduction::sum_dims(weighted, dims, false)?
+    };
+    reduced.view_reshape(target_shape.to_vec())
+}
+
+/// Backward for the Kronecker product `K = kron(A, B)`.
 ///
-/// Forward (2-D case of `Tensor kron(...)` at
-/// `aten/src/ATen/native/LinearAlgebra.cpp:3530`, the reshape, broadcast-mul,
-/// and view recipe `KronImpl::kron`): for `A` `(p, q)` and `B` `(r, s)`,
-/// the result is `K[i*r + u, j*s + v] = A[i,j] * B[u,v]`, shape `(p*r, q*s)`.
-///
-/// Backward (adjoint of the bilinear product, equivalently the autograd of the
-/// reshape/mul recipe):
-/// - `dA[i,j] = sum_{u,v} grad[i*r+u, j*s+v] * B[u,v]`
-/// - `dB[u,v] = sum_{i,j} grad[i*r+u, j*s+v] * A[i,j]`
+/// PyTorch's `KronImpl` (`aten/src/ATen/native/LinearAlgebra.cpp:3476-3531`)
+/// pads the shorter rank with leading singleton dimensions, reshapes inputs to
+/// alternating `[a_i, 1]` / `[1, b_i]` axes, multiplies those views, then views
+/// the result as `[a_i * b_i]`. The VJP is the adjoint of that exact recipe:
+/// reshape upstream grad back to alternating axes, multiply by the opposite
+/// padded input view, sum over the opposite axes, and reshape away any leading
+/// padded singleton dimensions.
 #[derive(Debug)]
 pub struct KronBackward<T: Float> {
     a: Tensor<T>,
@@ -6373,54 +6438,41 @@ pub struct KronBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for KronBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let p = self.a.shape()[0];
-        let q = self.a.shape()[1];
-        let r = self.b.shape()[0];
-        let s = self.b.shape()[1];
-        let cols = q * s;
-        let g = grad_output.data()?;
-        let zero = <T as num_traits::Zero>::zero();
-
-        let grad_a = if self.a.requires_grad() {
-            let bd = self.b.data()?;
-            let mut out = vec![zero; p * q];
-            for i in 0..p {
-                for j in 0..q {
-                    let mut acc = zero;
-                    for u in 0..r {
-                        let grow = (i * r + u) * cols;
-                        for v in 0..s {
-                            acc += g[grow + j * s + v] * bd[u * s + v];
-                        }
-                    }
-                    out[i * q + j] = acc;
-                }
+        crate::autograd::no_grad::no_grad(|| {
+            ensure_same_device(&self.a, &self.b)?;
+            ensure_same_device(&self.a, grad_output)?;
+            let meta = kron_metadata(self.a.shape(), self.b.shape())?;
+            if grad_output.shape() != meta.result_shape.as_slice() {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "kron backward: grad_output shape {:?} does not match output shape {:?}",
+                        grad_output.shape(),
+                        meta.result_shape
+                    ),
+                });
             }
-            Some(from_cpu(out, vec![p, q])?)
-        } else {
-            None
-        };
 
-        let grad_b = if self.b.requires_grad() {
-            let ad = self.a.data()?;
-            let mut out = vec![zero; r * s];
-            for u in 0..r {
-                for v in 0..s {
-                    let mut acc = zero;
-                    for i in 0..p {
-                        for j in 0..q {
-                            acc += g[(i * r + u) * cols + j * s + v] * ad[i * q + j];
-                        }
-                    }
-                    out[u * s + v] = acc;
-                }
-            }
-            Some(from_cpu(out, vec![r, s])?)
-        } else {
-            None
-        };
+            let grad_view = grad_output.view_reshape(meta.mul_shape.clone())?;
+            let grad_a = if self.a.requires_grad() {
+                let b_view = self.b.view_reshape(meta.b_view_shape.clone())?;
+                let weighted = grad_view.mul_t(&b_view)?;
+                let dims: Vec<i64> = (0..meta.max_dim).map(|i| (2 * i + 1) as i64).collect();
+                Some(reduce_kron_grad(&weighted, &dims, self.a.shape())?)
+            } else {
+                None
+            };
 
-        Ok(vec![grad_a, grad_b])
+            let grad_b = if self.b.requires_grad() {
+                let a_view = self.a.view_reshape(meta.a_view_shape)?;
+                let weighted = grad_view.mul_t(&a_view)?;
+                let dims: Vec<i64> = (0..meta.max_dim).map(|i| (2 * i) as i64).collect();
+                Some(reduce_kron_grad(&weighted, &dims, self.b.shape())?)
+            } else {
+                None
+            };
+
+            Ok(vec![grad_a, grad_b])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -6432,50 +6484,21 @@ impl<T: Float> GradFn<T> for KronBackward<T> {
     }
 }
 
-/// Differentiable 2-D Kronecker product. Mirrors the 2-D specialisation of
-/// `Tensor kron(const Tensor& self, const Tensor& other)` at
-/// `aten/src/ATen/native/LinearAlgebra.cpp:3530`.
+/// Differentiable Kronecker product. Mirrors `Tensor kron(const Tensor& self,
+/// const Tensor& other)` at `aten/src/ATen/native/LinearAlgebra.cpp:3530`:
+/// rank-pad with leading singleton dimensions, multiply alternating views, and
+/// reshape to the per-axis products.
 pub fn kron_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.ndim() != 2 || b.ndim() != 2 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "kron: only 2-D × 2-D supported here, got {:?} and {:?}",
-                a.shape(),
-                b.shape()
-            ),
-        });
-    }
-    let p = a.shape()[0];
-    let q = a.shape()[1];
-    let r = b.shape()[0];
-    let s = b.shape()[1];
-    let rows = p * r;
-    let cols = q * s;
-    let ad = a.data()?;
-    let bd = b.data()?;
-    let mut out = vec![<T as num_traits::Zero>::zero(); rows * cols];
-    for i in 0..p {
-        for j in 0..q {
-            let aij = ad[i * q + j];
-            for u in 0..r {
-                let orow = (i * r + u) * cols;
-                for v in 0..s {
-                    out[orow + j * s + v] = aij * bd[u * s + v];
-                }
-            }
-        }
-    }
-    let storage = TensorStorage::cpu(out);
-    let shape = vec![rows, cols];
-
+    let result = crate::autograd::no_grad::no_grad(|| kron_forward_composite(a, b))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let grad_fn = Arc::new(KronBackward {
             a: a.clone(),
             b: b.clone(),
         });
+        let (storage, shape) = result.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, shape, false)
+        Ok(result)
     }
 }
 
