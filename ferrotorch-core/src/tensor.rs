@@ -2036,10 +2036,10 @@ impl<T: Float> Tensor<T> {
             })
     }
 
-    /// `masked_fill(mask, value)` — `out[i] = mask[i] ? value : self[i]`,
-    /// returning a new tensor of the same shape (mask convention "true → fill",
-    /// matching `torch.Tensor.masked_fill`). `mask` must have the same numel as
-    /// `self` and live on the same device.
+    /// `masked_fill(mask, value)` — fill where `mask` is true, returning a new
+    /// tensor with PyTorch/NumPy broadcast semantics. `self` and `mask` are
+    /// broadcast to their common shape before the fill is applied; incompatible
+    /// shapes are rejected even if their flattened numel matches.
     ///
     /// When both `self` and `mask` are CUDA-resident, the fill runs on the GPU
     /// (real PTX kernel dispatched on `self`'s dtype) and the result stays
@@ -2052,7 +2052,7 @@ impl<T: Float> Tensor<T> {
         mask: &crate::bool_tensor::BoolTensor,
         value: T,
     ) -> FerrotorchResult<Tensor<T>> {
-        crate::grad_fns::indexing::masked_fill_bt(self, mask, value)
+        crate::grad_fns::indexing::masked_fill_bcast(self, mask, value)
     }
 
     /// `masked_select(mask)` — return a 1-D tensor of the elements of `self`

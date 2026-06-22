@@ -68,8 +68,8 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use ferrotorch_core::grad_fns::indexing::{
     GatherBackward, IndexSelectBackward, IndexSelectDimBackward, MaskedFillBackward,
     MaskedSelectBackward, ScatterAddBackward, ScatterBackward, WhereCondBackward, index_select_1d,
-    index_select_1d_it, index_select_dim, masked_fill, masked_fill_bt, masked_select_bcast,
-    where_cond_bcast,
+    index_select_1d_it, index_select_dim, masked_fill, masked_fill_bcast, masked_fill_bt,
+    masked_select_bcast, where_cond_bcast,
 };
 use ferrotorch_core::grad_fns::shape::{
     CatBackward, ExpandBackward, FlattenBackward, ReshapeBackward, SplitBackward, SqueezeBackward,
@@ -2850,6 +2850,127 @@ fn cpu_masked_fill_via_bool_tensor() {
 }
 
 #[test]
+fn cpu_masked_fill_public_api_broadcast_and_backward() {
+    // PyTorch reference:
+    //   x = torch.tensor([[1., 2., 3.]], requires_grad=True)
+    //   mask = torch.tensor([[True], [False]])
+    //   x.masked_fill(mask, -1.) -> [[-1,-1,-1],[1,2,3]]
+    //   out.sum().backward(); x.grad -> [[1,1,1]]
+    let mask = BoolTensor::from_vec(vec![true, false], vec![2, 1]).expect("broadcast mask");
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], true);
+
+    let out = masked_fill_bcast(&input, &mask, -1.0_f32).expect("masked_fill_bcast");
+    assert_eq!(out.shape(), &[2, 3]);
+    check_f32(
+        "masked_fill_bcast cpu fwd",
+        &read_back_f32(&out),
+        &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+    out.sum_all()
+        .expect("masked_fill_bcast sum")
+        .backward()
+        .expect("masked_fill_bcast backward");
+    let grad = input.grad().unwrap().expect("masked_fill_bcast grad");
+    assert_eq!(grad.shape(), &[1, 3]);
+    check_f32(
+        "masked_fill_bcast cpu grad",
+        &read_back_f32(&grad),
+        &[1.0, 1.0, 1.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let method_input = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false);
+    let method_out = method_input
+        .masked_fill(&mask, -1.0_f32)
+        .expect("Tensor::masked_fill broadcast");
+    assert_eq!(method_out.shape(), &[2, 3]);
+    check_f32(
+        "Tensor::masked_fill cpu fwd",
+        &read_back_f32(&method_out),
+        &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    let bt_input = make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false);
+    let bt_out = masked_fill_bt(&bt_input, &mask, -1.0_f32).expect("masked_fill_bt broadcast");
+    assert_eq!(bt_out.shape(), &[2, 3]);
+    check_f32(
+        "masked_fill_bt cpu fwd",
+        &read_back_f32(&bt_out),
+        &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
+fn cpu_masked_fill_rejects_equal_numel_incompatible_shapes() {
+    // PyTorch rejects this even though both operands have four elements:
+    // input shape [2,2] and mask shape [4] are not broadcast-compatible.
+    let input = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    let mask = BoolTensor::from_vec(vec![true, false, true, false], vec![4]).expect("flat mask");
+
+    let err = input
+        .masked_fill(&mask, 0.0_f32)
+        .expect_err("Tensor::masked_fill must reject incompatible broadcast");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let err = masked_fill_bcast(&input, &mask, 0.0_f32)
+        .expect_err("masked_fill_bcast must reject incompatible broadcast");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let err = masked_fill_bt(&input, &mask, 0.0_f32)
+        .expect_err("masked_fill_bt must reject incompatible broadcast");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+}
+
+#[test]
+fn cpu_masked_fill_backward_public_struct_validates_and_accepts_strided_grad() {
+    let input = make_cpu_f32(&[1.0, 2.0], &[2], true);
+    let mask = BoolTensor::from_vec(vec![true, false], vec![2]).expect("mask");
+    let grad_fn = MaskedFillBackward {
+        input: input.clone(),
+        mask: mask.clone(),
+    };
+
+    let bad_grad = make_cpu_f32(&[1.0], &[1], false);
+    let err = grad_fn
+        .backward(&bad_grad)
+        .expect_err("wrong grad shape must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    let bad_mask_fn = MaskedFillBackward {
+        input: input.clone(),
+        mask: BoolTensor::from_vec(vec![true, false], vec![1, 2])
+            .expect("same-numel wrong-shape mask"),
+    };
+    let good_grad = make_cpu_f32(&[1.0, 2.0], &[2], false);
+    let err = bad_mask_fn
+        .backward(&good_grad)
+        .expect_err("same-numel wrong-shape saved mask must be rejected");
+    assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+    // Non-contiguous grad_output view, logical values [1, 2]. PyTorch's
+    // autograd accepts non-contiguous incoming grads; masked_fill backward must
+    // read logical order and zero only positions filled in the forward.
+    let grad_base = make_cpu_f32(&[9.0, 1.0, 8.0, 2.0], &[4], false);
+    let grad_view = grad_base
+        .as_strided(&[2], &[2], Some(1))
+        .expect("strided grad_output");
+    let grads = grad_fn
+        .backward(&grad_view)
+        .expect("strided grad_output is valid");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert_eq!(grad.shape(), &[2]);
+    check_f32(
+        "masked_fill backward strided grad",
+        &read_back_f32(grad),
+        &[0.0, 2.0],
+        tolerance::F32_BITEXACT,
+    );
+}
+
+#[test]
 fn cpu_masked_select_public_api_broadcast_and_backward() {
     // PyTorch reference:
     //   x = torch.tensor([[10., 20.]], requires_grad=True)
@@ -4531,6 +4652,105 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_masked_fill_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_masked_fill_public_api_broadcast_and_backward() {
+        ensure_cuda_backend();
+        let mask = BoolTensor::from_vec(vec![true, false], vec![2, 1])
+            .expect("broadcast mask")
+            .to(Device::Cuda(0))
+            .expect("upload mask");
+        let input = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], true),
+            Device::Cuda(0),
+        );
+
+        let out = masked_fill_bcast(&input, &mask, -1.0_f32).expect("CUDA masked_fill_bcast");
+        assert!(
+            out.is_cuda(),
+            "masked_fill_bcast output must stay CUDA-resident"
+        );
+        assert_eq!(out.shape(), &[2, 3]);
+        check_f32(
+            "masked_fill_bcast cuda fwd",
+            &read_back_f32(&out),
+            &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+        out.sum_all()
+            .expect("CUDA masked_fill_bcast sum")
+            .backward()
+            .expect("CUDA masked_fill_bcast backward");
+        let grad = input.grad().unwrap().expect("CUDA masked_fill_bcast grad");
+        assert!(
+            grad.is_cuda(),
+            "masked_fill_bcast grad must stay CUDA-resident"
+        );
+        assert_eq!(grad.shape(), &[1, 3]);
+        check_f32(
+            "masked_fill_bcast cuda grad",
+            &read_back_f32(&grad),
+            &[1.0, 1.0, 1.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let method_input = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false),
+            Device::Cuda(0),
+        );
+        let method_out = method_input
+            .masked_fill(&mask, -1.0_f32)
+            .expect("CUDA Tensor::masked_fill broadcast");
+        assert!(method_out.is_cuda(), "Tensor::masked_fill output device");
+        check_f32(
+            "Tensor::masked_fill cuda fwd",
+            &read_back_f32(&method_out),
+            &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        let bt_input = upload_f32(
+            make_cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false),
+            Device::Cuda(0),
+        );
+        let bt_out =
+            masked_fill_bt(&bt_input, &mask, -1.0_f32).expect("CUDA masked_fill_bt broadcast");
+        assert!(bt_out.is_cuda(), "masked_fill_bt output device");
+        check_f32(
+            "masked_fill_bt cuda fwd",
+            &read_back_f32(&bt_out),
+            &[-1.0, -1.0, -1.0, 1.0, 2.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+    }
+
+    #[test]
+    fn gpu_masked_fill_backward_public_struct_rejects_bad_grad_shape_or_device() {
+        ensure_cuda_backend();
+        let input = upload_f32(make_cpu_f32(&[1.0, 2.0], &[2], true), Device::Cuda(0));
+        let mask = BoolTensor::from_vec(vec![true, false], vec![2])
+            .expect("mask")
+            .to(Device::Cuda(0))
+            .expect("upload mask");
+        let grad_fn = MaskedFillBackward {
+            input,
+            mask: mask.clone(),
+        };
+
+        let bad_shape_grad = make_cpu_f32(&[1.0], &[1], false)
+            .to(Device::Cuda(0))
+            .expect("upload bad-shape grad");
+        let err = grad_fn
+            .backward(&bad_shape_grad)
+            .expect_err("CUDA wrong grad shape must be rejected");
+        assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
+
+        let cpu_grad = make_cpu_f32(&[1.0, 2.0], &[2], false);
+        let err = grad_fn
+            .backward(&cpu_grad)
+            .expect_err("CPU grad for CUDA saved tensors must be rejected");
+        assert!(matches!(err, FerrotorchError::DeviceMismatch { .. }));
     }
 
     #[test]

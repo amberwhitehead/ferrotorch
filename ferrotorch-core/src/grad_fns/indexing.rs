@@ -447,12 +447,12 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
                 ),
             });
         }
-        if self.mask.numel() != self.input.numel() {
+        if self.mask.shape() != self.input.shape() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "MaskedFillBackward: mask numel {} does not match input numel {}",
-                    self.mask.numel(),
-                    self.input.numel()
+                    "MaskedFillBackward: mask shape {:?} does not match input shape {:?}",
+                    self.mask.shape(),
+                    self.input.shape()
                 ),
             });
         }
@@ -478,12 +478,13 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
                     got: self.mask.device(),
                 });
             }
+            if grad_output.device() != expected {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected,
+                    got: grad_output.device(),
+                });
+            }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let grad_output = if grad_output.device() == expected {
-                grad_output.clone()
-            } else {
-                grad_output.to(expected)?
-            };
             // `.contiguous()` is required even when the shape/stride layout is
             // logically contiguous: a CUDA view can carry a non-zero
             // storage_offset or share a larger base buffer. Backend kernels only
@@ -1462,21 +1463,32 @@ impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
 // First-class IntTensor / BoolTensor wrappers (#615)
 // ---------------------------------------------------------------------------
 
-/// `masked_fill` taking a [`BoolTensor`] mask. Shape and numel must
-/// match `input`. Returns a new tensor; original unchanged. Mirrors
-/// torch's `tensor.masked_fill(mask, value)` with mask convention
-/// "true → fill" (same as the existing `&[bool]` variant).
+/// `masked_fill` taking a [`BoolTensor`] mask. Mirrors torch's
+/// `tensor.masked_fill(mask, value)`: `input` and `mask` broadcast to their
+/// common shape before the fill is applied. Returns a new tensor; original
+/// unchanged. Mask convention is "true → fill" (same as the existing `&[bool]`
+/// flat-mask variant).
 pub fn masked_fill_bt<T: Float>(
     input: &Tensor<T>,
     mask: &BoolTensor,
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
-    if mask.numel() != input.numel() {
+    masked_fill_bcast(input, mask, value)
+}
+
+/// Shape-strict masked-fill used after PyTorch-style broadcasting has already
+/// produced equal-shape operands.
+pub(crate) fn masked_fill_bt_strict<T: Float>(
+    input: &Tensor<T>,
+    mask: &BoolTensor,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    if mask.shape() != input.shape() {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "masked_fill_bt: mask numel={} != input numel={}",
-                mask.numel(),
-                input.numel()
+                "masked_fill_bt: mask shape {:?} != input shape {:?}",
+                mask.shape(),
+                input.shape()
             ),
         });
     }
@@ -2239,11 +2251,10 @@ pub fn index_fill<T: Float>(
 //   - `where(condition, self, other)` runs a TensorIterator over all three
 //     operands at `aten/src/ATen/native/TensorCompare.cpp:629-638` —
 //     condition, self, other all broadcast to a common output shape.
-// The existing ferrotorch entry points (`masked_fill_bt`, `where_cond_bt`,
-// `ops::indexing::masked_select`) require identical shapes; they predate the
-// broadcasting contract. These wrappers infer the common broadcast shape
-// using `shape::broadcast_shapes`, expand each operand to that shape, then
-// delegate to the existing shape-strict entry point.
+// The public ferrotorch entry points now route through these PyTorch-style
+// wrappers. Internally, each wrapper infers the common broadcast shape using
+// `shape::broadcast_shapes`, expands each operand to that shape, then delegates
+// to a shape-strict kernel entry point.
 //
 // Autograd correctness: `Tensor::expand` (via `grad_fns::shape::expand`) is
 // autograd-aware and attaches `ExpandBackward`, which reduces upstream
@@ -2368,7 +2379,7 @@ pub(crate) fn broadcast_bool_tensor(
 /// with PyTorch's broadcasting semantics. The input and mask are broadcast to
 /// their common shape (per `aten/src/ATen/native/TensorAdvancedIndexing.cpp:
 /// 2494-2509 Tensor masked_fill(...) { ... expand_outplace(mask, self); ... }`)
-/// before the fill is applied. Delegates to [`masked_fill_bt`] on the
+/// before the fill is applied. Delegates to a shape-strict masked-fill kernel on the
 /// broadcasted operands; the autograd graph routes through the
 /// autograd-aware [`crate::grad_fns::shape::expand`] so gradients reduce back
 /// to the original input shape via `ExpandBackward`.
@@ -2378,14 +2389,14 @@ pub fn masked_fill_bcast<T: Float>(
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
     if input.shape() == mask.shape() {
-        return masked_fill_bt(input, mask, value);
+        return masked_fill_bt_strict(input, mask, value);
     }
     let common = crate::shape::broadcast_shapes(input.shape(), mask.shape())?;
     // Autograd-aware expand on the float operand; ExpandBackward will reduce
     // gradients of the MaskedFillBackward output back to input.shape().
     let input_b = crate::grad_fns::shape::expand(input, &common)?;
     let mask_b = broadcast_bool_tensor(mask, &common)?;
-    masked_fill_bt(&input_b, &mask_b, value)
+    masked_fill_bt_strict(&input_b, &mask_b, value)
 }
 
 /// Broadcasting `masked_select` — mirrors `torch.masked_select(input, mask)`

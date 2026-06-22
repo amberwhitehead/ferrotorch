@@ -184,7 +184,7 @@ impl<T: Float> MaskedTensor<T> {
     /// **Device (#1759 / CORE-065):** the result lives on the data tensor's
     /// device. On CUDA the fill runs on-device via the dtype-generic
     /// resident `masked_fill_dt` kernel
-    /// ([`crate::grad_fns::indexing::masked_fill_bt`]); only the
+    /// ([`crate::grad_fns::indexing::masked_fill_bcast`]); only the
     /// host-resident boolean mask is uploaded — the value data never leaves
     /// the device. Torch parity: `masked_tensor(tc, mc).to_tensor(0.0)` on a
     /// CUDA input returns `device='cuda:0'`.
@@ -197,7 +197,7 @@ impl<T: Float> MaskedTensor<T> {
         if self.data.is_cuda() {
             // Resident-mask path → dtype-generic `masked_fill_dt` kernel
             // (f32/f64/bf16/f16). Result stays on the data device; the
-            // autograd edge is attached inside `masked_fill_bt`.
+            // autograd edge is attached inside `masked_fill_bcast`.
             let mask_bt = BoolTensor::from_slice(&fill_positions, self.data.shape())?
                 .to(self.data.device())?;
             return crate::grad_fns::indexing::masked_fill_bt(
