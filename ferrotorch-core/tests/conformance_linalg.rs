@@ -2090,7 +2090,8 @@ fn cpu_lu_factor_smoke() {
         let a = make_cpu_f64(a_data, a_shape, false);
         let (lu_packed, ipiv) = lu_factor(&a).expect("lu_factor");
         assert_eq!(lu_packed.shape(), a_shape);
-        assert_eq!(ipiv.len(), a_shape[0].min(a_shape[1]));
+        assert_eq!(ipiv.numel(), a_shape[0].min(a_shape[1]));
+        assert_eq!(ipiv.shape(), &[a_shape[0].min(a_shape[1])]);
     }
 }
 

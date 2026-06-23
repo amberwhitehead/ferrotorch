@@ -294,7 +294,8 @@ fn lu_factor_tall_cpu_tracked_matches_finite_difference() {
     let a = leaf(&data, &[3, 2]);
     let (lu, pivots) = linalg::lu_factor(&a).unwrap();
     assert_eq!(lu.shape(), &[3, 2]);
-    assert_eq!(pivots.len(), 2);
+    assert_eq!(pivots.numel(), 2);
+    assert_eq!(pivots.shape(), &[2]);
     assert!(lu.requires_grad());
     let w = plain(&weights, &[3, 2]);
     lu.mul_t(&w).unwrap().sum_all().unwrap().backward().unwrap();
@@ -964,7 +965,8 @@ mod gpu {
         let (lu_gpu, pivots_gpu) = linalg::lu_factor(&a_gpu).unwrap();
         assert_eq!(lu_gpu.device(), Device::Cuda(0));
         assert_eq!(lu_gpu.shape(), &[3, 2]);
-        assert_eq!(pivots_gpu.len(), 2);
+        assert_eq!(pivots_gpu.device(), Device::Cuda(0));
+        assert_eq!(pivots_gpu.numel(), 2);
         lu_gpu
             .mul_t(&w_gpu)
             .unwrap()
@@ -978,7 +980,8 @@ mod gpu {
         let a_cpu = cpu_leaf(&data, &[3, 2]);
         let w_cpu = plain(&weights, &[3, 2]);
         let (lu_cpu, pivots_cpu) = linalg::lu_factor(&a_cpu).unwrap();
-        assert_eq!(pivots_cpu, pivots_gpu);
+        let pivots_gpu_cpu = pivots_gpu.to(Device::Cpu).unwrap();
+        assert_eq!(pivots_cpu.data().unwrap(), pivots_gpu_cpu.data().unwrap());
         lu_cpu
             .mul_t(&w_cpu)
             .unwrap()

@@ -5430,21 +5430,23 @@ impl<T: Float> GradFn<T> for LuFactorBackward<T> {
 }
 
 /// Differentiable `lu_factor`. Returns `(LU_packed, pivots)`;
-/// the pivot `Vec<i32>` is non-differentiable. Attaches `LuFactorBackward` to
+/// the pivot `IntTensor<i32>` is non-differentiable. Attaches `LuFactorBackward` to
 /// the packed `LU` output when grad is needed.
 ///
 /// Forward computed under `no_grad` (re-entry guard); the `P`/`L`/`U` matrices
 /// the VJP needs are unpacked from the same LU factorization.
 pub fn lu_factor_differentiable<T: Float>(
     a: &Tensor<T>,
-) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
+) -> FerrotorchResult<(Tensor<T>, crate::IntTensor<i32>)> {
     let (lu, pivots) = crate::autograd::no_grad::no_grad(|| linalg_fwd::lu_factor(a))?;
     let needs_grad = is_grad_enabled() && a.requires_grad();
     if !needs_grad {
         return Ok((lu, pivots));
     }
+    let pivots_cpu = pivots.to(crate::Device::Cpu)?;
+    let pivots_host = pivots_cpu.data()?.to_vec();
     let (p, l, u) =
-        crate::autograd::no_grad::no_grad(|| linalg_fwd::lu_unpack_from_factor(&lu, &pivots))?;
+        crate::autograd::no_grad::no_grad(|| linalg_fwd::lu_unpack_from_factor(&lu, &pivots_host))?;
     let node = Arc::new(LuFactorBackward {
         input: a.clone(),
         shared: LuBackwardShared { p, l, u },

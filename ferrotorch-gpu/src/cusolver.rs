@@ -1910,6 +1910,14 @@ pub fn gpu_solve_f64(
 // `&CudaBuffer<f32/f64>` (row-major) and we use `gpu_transpose_2d` for the
 // row→column→row roundtrip cuSOLVER demands.
 
+/// CUDA LU factorization result for f32:
+/// `(LU, pivots, info_tensor, host_info)`.
+pub type LuFactorExF32 = (CudaBuffer<f32>, CudaBuffer<i32>, CudaBuffer<i32>, i32);
+
+/// CUDA LU factorization result for f64:
+/// `(LU, pivots, info_tensor, host_info)`.
+pub type LuFactorExF64 = (CudaBuffer<f64>, CudaBuffer<i32>, CudaBuffer<i32>, i32);
+
 /// GPU-resident LU factorization of an m×n f32 matrix (#604).
 /// Mirrors `torch.linalg.lu_factor` for CUDA inputs.
 #[cfg(feature = "cuda")]
@@ -1919,7 +1927,7 @@ pub fn gpu_lu_factor_f32(
     n: usize,
     device: &GpuDevice,
 ) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i32>)> {
-    let (lu, ipiv, info_val) = gpu_lu_factor_ex_f32(a_dev, m, n, device)?;
+    let (lu, ipiv, _info, info_val) = gpu_lu_factor_ex_f32(a_dev, m, n, device)?;
     if info_val != 0 {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_lu_factor_f32: getrf failed (singular matrix)",
@@ -1930,16 +1938,17 @@ pub fn gpu_lu_factor_f32(
     Ok((lu, ipiv))
 }
 
-/// Non-throwing LU factorization. Returns LAPACK/cuSOLVER `info` alongside
-/// packed LU so determinant-family callers can mirror torch's signed-zero
-/// singular behavior without recomputing or downloading the matrix.
+/// Non-throwing LU factorization. Returns the CUDA-resident LAPACK/cuSOLVER
+/// `info` buffer alongside a host scalar cache so determinant-family callers
+/// can mirror torch's signed-zero singular behavior without recomputing the
+/// matrix.
 #[cfg(feature = "cuda")]
 pub fn gpu_lu_factor_ex_f32(
     a_dev: &CudaBuffer<f32>,
     m: usize,
     n: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i32>, i32)> {
+) -> GpuResult<LuFactorExF32> {
     use cudarc::cusolver::sys as csys;
 
     let total = m.checked_mul(n).ok_or(GpuError::ShapeMismatch {
@@ -1953,6 +1962,7 @@ pub fn gpu_lu_factor_ex_f32(
         return Ok((
             crate::transfer::alloc_zeros_f32(0, device)?,
             alloc_zeros_i32(0, device)?,
+            crate::transfer::cpu_to_gpu(&[0_i32], device)?,
             0,
         ));
     }
@@ -2053,7 +2063,7 @@ pub fn gpu_lu_factor_ex_f32(
 
     // Column-major LU → row-major.
     let lu_row = crate::kernels::gpu_transpose_2d(&d_a_col, n, m, device)?;
-    Ok((lu_row, d_ipiv, info_val))
+    Ok((lu_row, d_ipiv, d_info, info_val))
 }
 
 /// GPU-resident LU factorization (f64). Mirrors [`gpu_lu_factor_f32`]. (#604)
@@ -2064,7 +2074,7 @@ pub fn gpu_lu_factor_f64(
     n: usize,
     device: &GpuDevice,
 ) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i32>)> {
-    let (lu, ipiv, info_val) = gpu_lu_factor_ex_f64(a_dev, m, n, device)?;
+    let (lu, ipiv, _info, info_val) = gpu_lu_factor_ex_f64(a_dev, m, n, device)?;
     if info_val != 0 {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_lu_factor_f64: getrf failed (singular matrix)",
@@ -2082,7 +2092,7 @@ pub fn gpu_lu_factor_ex_f64(
     m: usize,
     n: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i32>, i32)> {
+) -> GpuResult<LuFactorExF64> {
     use cudarc::cusolver::sys as csys;
 
     let total = m.checked_mul(n).ok_or(GpuError::ShapeMismatch {
@@ -2096,6 +2106,7 @@ pub fn gpu_lu_factor_ex_f64(
         return Ok((
             crate::transfer::alloc_zeros_f64(0, device)?,
             alloc_zeros_i32(0, device)?,
+            crate::transfer::cpu_to_gpu(&[0_i32], device)?,
             0,
         ));
     }
@@ -2189,7 +2200,7 @@ pub fn gpu_lu_factor_ex_f64(
     }
 
     let lu_row = crate::kernels::gpu_transpose_2d_f64(&d_a_col, n, m, device)?;
-    Ok((lu_row, d_ipiv, info_val))
+    Ok((lu_row, d_ipiv, d_info, info_val))
 }
 
 // ---------------------------------------------------------------------------
@@ -5894,7 +5905,7 @@ pub fn gpu_lu_factor_ex_f32(
     _m: usize,
     _n: usize,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i32>, i32)> {
+) -> GpuResult<LuFactorExF32> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -5916,7 +5927,7 @@ pub fn gpu_lu_factor_ex_f64(
     _m: usize,
     _n: usize,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i32>, i32)> {
+) -> GpuResult<LuFactorExF64> {
     Err(GpuError::NoCudaFeature)
 }
 

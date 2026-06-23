@@ -470,7 +470,21 @@ struct LuFactorWithInfo<T: Float> {
     info: i32,
 }
 
-fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<LuFactorWithInfo<T>> {
+struct LuFactorTensorWithInfo<T: Float> {
+    lu: Tensor<T>,
+    pivots: IntTensor<i32>,
+    info: IntTensor<i32>,
+    host_info: i32,
+}
+
+fn i32_scalar_on_device(value: i32, device: Device) -> FerrotorchResult<IntTensor<i32>> {
+    IntTensor::<i32>::from_vec(vec![value], Vec::new())?.to(device)
+}
+
+fn lu_factor_tensor_with_info<T: Float>(
+    a: &Tensor<T>,
+    op: &str,
+) -> FerrotorchResult<LuFactorTensorWithInfo<T>> {
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -481,10 +495,11 @@ fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<Lu
     let k = m.min(n);
 
     if k == 0 {
-        return Ok(LuFactorWithInfo {
+        return Ok(LuFactorTensorWithInfo {
             lu: full_like_on_device(shape, <T as num_traits::Zero>::zero(), a.device(), op)?,
-            pivots: Vec::new(),
-            info: 0,
+            pivots: IntTensor::<i32>::from_vec(Vec::new(), vec![0])?.to(a.device())?,
+            info: i32_scalar_on_device(0, a.device())?,
+            host_info: 0,
         });
     }
 
@@ -492,15 +507,16 @@ fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<Lu
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let packed = a.contiguous()?;
-        let (lu_h, pivots, info) = if is_f32::<T>() {
+        let (lu_h, pivots_h, info_h, host_info) = if is_f32::<T>() {
             backend.lu_factor_ex_f32(packed.gpu_handle()?, m, n)?
         } else {
             backend.lu_factor_ex_f64(packed.gpu_handle()?, m, n)?
         };
-        return Ok(LuFactorWithInfo {
+        return Ok(LuFactorTensorWithInfo {
             lu: Tensor::from_storage(TensorStorage::gpu(lu_h), vec![m, n], false)?,
-            pivots,
-            info,
+            pivots: IntTensor::<i32>::from_gpu_handle(pivots_h, vec![k]),
+            info: IntTensor::<i32>::from_gpu_handle(info_h, Vec::new()),
+            host_info,
         });
     }
     if a.is_cuda() {
@@ -514,10 +530,21 @@ fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<Lu
     }
 
     let factor = cpu_lu_factor_packed(a.data_vec()?, m, n, op)?;
-    Ok(LuFactorWithInfo {
+    Ok(LuFactorTensorWithInfo {
         lu: Tensor::from_storage(TensorStorage::cpu(factor.packed), vec![m, n], false)?,
-        pivots: factor.pivots,
-        info: factor.info,
+        pivots: IntTensor::<i32>::from_vec(factor.pivots, vec![k])?,
+        info: IntTensor::<i32>::from_vec(vec![factor.info], Vec::new())?,
+        host_info: factor.info,
+    })
+}
+
+fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<LuFactorWithInfo<T>> {
+    let factor = lu_factor_tensor_with_info(a, op)?;
+    let pivots_cpu = factor.pivots.to(Device::Cpu)?;
+    Ok(LuFactorWithInfo {
+        lu: factor.lu,
+        pivots: pivots_cpu.data()?.to_vec(),
+        info: factor.host_info,
     })
 }
 
@@ -2148,8 +2175,8 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
     }
 
     if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        let (lu_packed, pivots) = lu_factor(a)?;
-        return lu_unpack_from_factor(&lu_packed, &pivots);
+        let factor = lu_factor_with_info(a, "lu")?;
+        return lu_unpack_from_factor(&factor.lu, &factor.pivots);
     }
     if a.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "lu" });
@@ -2333,17 +2360,16 @@ fn transpose_square_to_vec_f64<T: Float>(src: &[f64], n: usize) -> Vec<T> {
 /// LU factorization in cuSOLVER's packed form: returns `(LU_packed, pivots)`
 /// where `LU_packed` has the same `m×n` shape as `a`, the strict lower
 /// triangle stores `L` (unit diagonal implicit), the upper triangle stores
-/// `U`, and `pivots` is a length-`min(m, n)` host `Vec<i32>` of 1-based
-/// row-permutation indices (cuSOLVER /
-/// LAPACK convention). Mirrors `torch.linalg.lu_factor`. (#604)
+/// `U`, and `pivots` is a length-`min(m, n)` `IntTensor<i32>` of 1-based
+/// row-permutation indices (cuSOLVER / LAPACK convention). Mirrors
+/// `torch.linalg.lu_factor`. (#604)
 ///
 /// On CUDA f32/f64, dispatches to the native `gpu_lu_factor` kernel
 /// (cuSOLVER `getrf` with on-device row→col→row transpose). The LU matrix
-/// stays on device (O(mn) values); only the pivot vector (O(min(m,n)) ints) is
-/// downloaded to host as a `Vec<i32>` since `Tensor<T>` requires
-/// `T: Float`. CPU f32/f64 uses the same LAPACK GETRF-style packed layout in
-/// pure Rust and raises on singular input, matching `torch.linalg.lu_factor`.
-pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
+/// and the pivot tensor both stay on device. CPU f32/f64 uses the same LAPACK
+/// GETRF-style packed layout in pure Rust and raises on singular input,
+/// matching `torch.linalg.lu_factor`.
+pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, IntTensor<i32>)> {
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -2357,11 +2383,47 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
         return crate::grad_fns::linalg::lu_factor_differentiable(a);
     }
 
-    let factor = lu_factor_with_info(a, "lu_factor")?;
-    if factor.info > 0 {
-        return Err(lu_zero_pivot_error("lu_factor", factor.info));
+    let factor = lu_factor_tensor_with_info(a, "lu_factor")?;
+    if factor.host_info > 0 {
+        return Err(lu_zero_pivot_error("lu_factor", factor.host_info));
     }
     Ok((factor.lu, factor.pivots))
+}
+
+/// `torch.linalg.lu_factor_ex(A, *, pivot=True, check_errors=False)`.
+///
+/// Returns `(LU, pivots, info)`. `pivots` and `info` are `IntTensor<i32>` on
+/// the same device as `A`. The default `check_errors=false` mirrors PyTorch:
+/// singular inputs return a positive `info` instead of raising.
+pub fn lu_factor_ex<T: Float>(
+    a: &Tensor<T>,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i32>, IntTensor<i32>)> {
+    lu_factor_ex_with_options(a, true, false)
+}
+
+/// Option-bearing variant of [`lu_factor_ex`].
+///
+/// `pivot=false` matches PyTorch's option surface but is currently rejected
+/// with a structured error because Ferrotorch does not yet have a CUDA
+/// no-pivot GETRF path and PyTorch does not support no-pivot CPU LU either.
+pub fn lu_factor_ex_with_options<T: Float>(
+    a: &Tensor<T>,
+    pivot: bool,
+    check_errors: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i32>, IntTensor<i32>)> {
+    if !pivot {
+        return Err(FerrotorchError::InvalidArgument {
+            message:
+                "lu_factor_ex: pivot=false is not implemented; PyTorch supports it only on CUDA"
+                    .into(),
+        });
+    }
+
+    let factor = lu_factor_tensor_with_info(a, "lu_factor_ex")?;
+    if check_errors && factor.host_info > 0 {
+        return Err(lu_zero_pivot_error("lu_factor_ex", factor.host_info));
+    }
+    Ok((factor.lu, factor.pivots, factor.info))
 }
 
 // ===========================================================================
@@ -5922,7 +5984,7 @@ mod tests {
         // LU=[[3,4],[1/3,2/3]], pivots=[2,2], info=0.
         let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let (lu_packed, pivots) = lu_factor(&a).unwrap();
-        assert_eq!(pivots, vec![2, 2]);
+        assert_eq!(pivots.data().unwrap(), &[2, 2]);
         let d = lu_packed.data().unwrap();
         assert!((d[0] - 3.0).abs() < 1e-12);
         assert!((d[1] - 4.0).abs() < 1e-12);
@@ -5934,6 +5996,20 @@ mod tests {
     fn lu_factor_cpu_reports_singular_pivot_index() {
         let a = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
         let err = lu_factor(&a).expect_err("torch.linalg.lu_factor raises on singular input");
+        assert_eq!(ex_numerical_info(&err), Some(2));
+    }
+
+    #[test]
+    fn lu_factor_ex_cpu_returns_info_tensor_for_singular_input() {
+        let a = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
+        let (lu, pivots, info) = lu_factor_ex(&a).unwrap();
+        assert_eq!(lu.shape(), &[2, 2]);
+        assert_eq!(pivots.shape(), &[2]);
+        assert_eq!(info.shape(), &[] as &[usize]);
+        assert_eq!(info.data().unwrap(), &[2]);
+
+        let err = lu_factor_ex_with_options(&a, true, true)
+            .expect_err("check_errors=true should match lu_factor singular error");
         assert_eq!(ex_numerical_info(&err), Some(2));
     }
 

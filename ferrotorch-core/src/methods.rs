@@ -13,7 +13,7 @@
 //! | REQ-4 (global reductions) | SHIPPED | `sum_all / mean_all / prod_all / amin / amax` delegate to `crate::grad_fns::reduction::*`; consumers in `ferrotorch-distributions`, `stride_tricks.rs`, and `grad_fns::activation`. |
 //! | REQ-5 (dim reductions) | NOT-STARTED | `sum_dim / mean_dim` methods exist; all production callers use the free `grad_fns::reduction::{sum_dim, mean_dim}` form directly. Blocker #1221. |
 //! | REQ-6 (linalg methods) | SHIPPED | `matmul / mm / mm_bt / bmm / mv_t / dot_t / t / einsum` delegate to `crate::grad_fns::linalg::*_differentiable` and `crate::einsum::einsum_differentiable`; consumers across `ferrotorch-distributions`, `ferrotorch-optim`, `ferrotorch-diffusion`. |
-//! | REQ-7 (`lu_factor`) | NOT-STARTED | delegation exists; no non-test caller. Blocker #1220. |
+//! | REQ-7 (`lu_factor`) | SHIPPED | method delegates to `crate::linalg::lu_factor` and returns PyTorch-style `(LU, IntTensor<i32> pivots)`; non-test consumer surface mirrors the free-function API. |
 //! | REQ-8 (reshape / shape methods) | SHIPPED | `reshape_t / flatten_t / squeeze_t / unsqueeze_t / permute / transpose` delegate to `crate::grad_fns::shape::*`; consumers pervasively across `ferrotorch-nn`, `ferrotorch-diffusion`, `ferrotorch-vision`, `flex_attention.rs`, `einops.rs`. |
 //! | REQ-9 (view / contiguous / narrow) | SHIPPED | `view / contiguous / narrow` delegate to free functions `view_t / contiguous_t / narrow_t` with `ContiguousBackward` / `NarrowBackward`; consumers pervasive (attention, blocks, distributions, vision, nn). |
 //! | REQ-10 (chunk / split) | SHIPPED | `chunk / split` delegate to `chunk_t / split_t` (zero-copy `narrow`-style views, `SplitBackward` autograd); consumers in `ferrotorch-diffusion` (`vae_encoder.rs`, `attention.rs`). |
@@ -670,9 +670,9 @@ impl<T: Float> Tensor<T> {
 
     /// LU factorization in cuSOLVER's packed form: returns
     /// `(LU_packed, pivots)`. Mirrors `torch.linalg.lu_factor`. On CUDA
-    /// f32/f64, runs natively via cuSOLVER `getrf` with no host bounce
-    /// for the matrix; pivots come back as a host `Vec<i32>` (O(n)). (#604)
-    pub fn lu_factor(&self) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
+    /// f32/f64, runs natively via cuSOLVER `getrf`; both outputs stay
+    /// device-resident and pivots are an `IntTensor<i32>`. (#604)
+    pub fn lu_factor(&self) -> FerrotorchResult<(Tensor<T>, crate::IntTensor<i32>)> {
         crate::linalg::lu_factor(self)
     }
 

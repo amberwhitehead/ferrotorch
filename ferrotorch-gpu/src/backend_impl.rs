@@ -8884,15 +8884,15 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
         let (lu, ipiv) =
             crate::cusolver::gpu_lu_factor_f32(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
-        // Pivots are O(min(m,n)) ints — download to host. The LU matrix
-        // (O(m*n)) stays on device.
-        let ipiv_host = crate::transfer::gpu_to_cpu(&ipiv, dev).map_err(Self::map_gpu_err)?;
-        Ok((Self::wrap_buffer(lu, a.device_ordinal()), ipiv_host))
+        Ok((
+            Self::wrap_buffer(lu, a.device_ordinal()),
+            Self::wrap_buffer_i32(ipiv, a.device_ordinal()),
+        ))
     }
 
     fn lu_factor_ex_f32(
@@ -8900,13 +8900,17 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle, i32)> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let (lu, ipiv, info) =
+        let (lu, ipiv, info_buf, info) =
             crate::cusolver::gpu_lu_factor_ex_f32(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
-        let ipiv_host = crate::transfer::gpu_to_cpu(&ipiv, dev).map_err(Self::map_gpu_err)?;
-        Ok((Self::wrap_buffer(lu, a.device_ordinal()), ipiv_host, info))
+        Ok((
+            Self::wrap_buffer(lu, a.device_ordinal()),
+            Self::wrap_buffer_i32(ipiv, a.device_ordinal()),
+            Self::wrap_buffer_i32(info_buf, a.device_ordinal()),
+            info,
+        ))
     }
 
     fn lu_factor_f64(
@@ -8914,13 +8918,15 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
         let (lu, ipiv) =
             crate::cusolver::gpu_lu_factor_f64(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
-        let ipiv_host = crate::transfer::gpu_to_cpu(&ipiv, dev).map_err(Self::map_gpu_err)?;
-        Ok((Self::wrap_buffer_f64(lu, a.device_ordinal()), ipiv_host))
+        Ok((
+            Self::wrap_buffer_f64(lu, a.device_ordinal()),
+            Self::wrap_buffer_i32(ipiv, a.device_ordinal()),
+        ))
     }
 
     fn lu_factor_ex_f64(
@@ -8928,15 +8934,15 @@ impl GpuBackend for CudaBackendImpl {
         a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle, i32)> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let (lu, ipiv, info) =
+        let (lu, ipiv, info_buf, info) =
             crate::cusolver::gpu_lu_factor_ex_f64(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
-        let ipiv_host = crate::transfer::gpu_to_cpu(&ipiv, dev).map_err(Self::map_gpu_err)?;
         Ok((
             Self::wrap_buffer_f64(lu, a.device_ordinal()),
-            ipiv_host,
+            Self::wrap_buffer_i32(ipiv, a.device_ordinal()),
+            Self::wrap_buffer_i32(info_buf, a.device_ordinal()),
             info,
         ))
     }

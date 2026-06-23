@@ -7,7 +7,7 @@
 #![cfg(feature = "cuda")]
 
 use ferrotorch_core::linalg;
-use ferrotorch_core::{Device, Tensor, TensorStorage};
+use ferrotorch_core::{Device, IntTensor, Tensor, TensorStorage};
 use ferrotorch_gpu::init_cuda_backend;
 
 fn ensure_cuda() {
@@ -24,6 +24,10 @@ fn cpu_t_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 
 fn cpu_t_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
+}
+
+fn pivots_host(ipiv: &IntTensor<i32>) -> Vec<i32> {
+    ipiv.to(Device::Cpu).unwrap().data().unwrap().to_vec()
 }
 
 /// Reconstruct A from packed LU + pivots. Used to validate the GPU path
@@ -130,19 +134,40 @@ fn lu_factor_f32_3x3_reconstructs_input() {
 
     let (lu, ipiv) = linalg::lu_factor(&a_gpu).unwrap();
     assert_eq!(lu.shape(), &[3, 3]);
-    assert_eq!(ipiv.len(), 3);
+    assert_eq!(ipiv.shape(), &[3]);
+    assert_eq!(ipiv.device(), Device::Cuda(0));
     // LU stays on GPU.
     assert!(matches!(lu.device(), Device::Cuda(0)));
 
     // Reconstruct A from the factorization and compare element-wise.
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, 3, 3);
+    let ipiv_host = pivots_host(&ipiv);
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv_host, 3, 3);
     for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
         assert!(
             (got - expected).abs() < 1e-4,
             "mismatch at {i}: got {got}, expected {expected}"
         );
     }
+}
+
+#[test]
+fn lu_factor_ex_f32_returns_cuda_pivots_and_info_tensors() {
+    ensure_cuda();
+    let a_data: Vec<f32> = vec![
+        1.0, 2.0, 3.0, //
+        4.0, 5.0, 6.0, //
+        7.0, 8.0, 10.0,
+    ];
+    let a_gpu = cpu_t_f32(&a_data, &[3, 3]).to(Device::Cuda(0)).unwrap();
+
+    let (lu, pivots, info) = linalg::lu_factor_ex(&a_gpu).unwrap();
+    assert_eq!(lu.device(), Device::Cuda(0));
+    assert_eq!(pivots.device(), Device::Cuda(0));
+    assert_eq!(info.device(), Device::Cuda(0));
+    assert_eq!(pivots.shape(), &[3]);
+    assert_eq!(info.shape(), &[] as &[usize]);
+    assert_eq!(info.to(Device::Cpu).unwrap().data().unwrap(), &[0]);
 }
 
 #[test]
@@ -161,10 +186,12 @@ fn lu_factor_f64_5x5_reconstructs_input() {
 
     let (lu, ipiv) = linalg::lu_factor(&a_gpu).unwrap();
     assert_eq!(lu.shape(), &[5, 5]);
-    assert_eq!(ipiv.len(), 5);
+    assert_eq!(ipiv.shape(), &[5]);
+    assert_eq!(ipiv.device(), Device::Cuda(0));
 
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f64(&lu_host, &ipiv, 5, 5);
+    let ipiv_host = pivots_host(&ipiv);
+    let recon = reconstruct_from_lu_factor_f64(&lu_host, &ipiv_host, 5, 5);
     for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
         assert!(
             (got - expected).abs() < 1e-9,
@@ -180,12 +207,14 @@ fn lu_factor_cpu_path_matches_gpu_via_reconstruction() {
     let a_cpu = cpu_t_f32(&a_data, &[3, 3]);
 
     let (cpu_lu, cpu_ipiv) = linalg::lu_factor(&a_cpu).unwrap();
-    let cpu_recon = reconstruct_from_lu_factor_f32(cpu_lu.data().unwrap(), &cpu_ipiv, 3, 3);
+    let cpu_recon =
+        reconstruct_from_lu_factor_f32(cpu_lu.data().unwrap(), cpu_ipiv.data().unwrap(), 3, 3);
 
     let a_gpu = a_cpu.to(Device::Cuda(0)).unwrap();
     let (gpu_lu, gpu_ipiv) = linalg::lu_factor(&a_gpu).unwrap();
     let gpu_lu_host = gpu_lu.cpu().unwrap().data().unwrap().to_vec();
-    let gpu_recon = reconstruct_from_lu_factor_f32(&gpu_lu_host, &gpu_ipiv, 3, 3);
+    let gpu_ipiv_host = pivots_host(&gpu_ipiv);
+    let gpu_recon = reconstruct_from_lu_factor_f32(&gpu_lu_host, &gpu_ipiv_host, 3, 3);
 
     // Both reconstruct A even though the factorizations may differ in
     // pivot order — element-wise equality on the reconstructions is the
@@ -205,9 +234,11 @@ fn lu_factor_f32_rectangular_2x3_reconstructs_input() {
     let a = cpu_t_f32(&a_data, &[2, 3]).to(Device::Cuda(0)).unwrap();
     let (lu, ipiv) = linalg::lu_factor(&a).unwrap();
     assert_eq!(lu.shape(), &[2, 3]);
-    assert_eq!(ipiv.len(), 2);
+    assert_eq!(ipiv.shape(), &[2]);
+    assert_eq!(ipiv.device(), Device::Cuda(0));
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, 2, 3);
+    let ipiv_host = pivots_host(&ipiv);
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv_host, 2, 3);
     for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
         assert!(
             (got - expected).abs() < 1e-4,
@@ -237,10 +268,12 @@ fn lu_factor_large_matrix_64x64_reconstructs() {
 
     let (lu, ipiv) = linalg::lu_factor(&a_gpu).unwrap();
     assert_eq!(lu.shape(), &[n, n]);
-    assert_eq!(ipiv.len(), n);
+    assert_eq!(ipiv.shape(), &[n]);
+    assert_eq!(ipiv.device(), Device::Cuda(0));
 
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, n, n);
+    let ipiv_host = pivots_host(&ipiv);
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv_host, n, n);
     let mut max_err = 0.0_f32;
     for (g, c) in recon.iter().zip(a_data.iter()) {
         max_err = max_err.max((g - c).abs());

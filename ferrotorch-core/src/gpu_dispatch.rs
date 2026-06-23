@@ -5824,33 +5824,35 @@ pub trait GpuBackend: Send + Sync {
     /// LU factorization in cuSOLVER's packed form: returns
     /// `(LU_packed, pivots)` where `LU_packed` is an `m×n` row-major GPU
     /// tensor handle (strict lower = `L`, upper = `U`), and `pivots` is a
-    /// host `Vec<i32>` of length `min(m, n)` (1-based row-permutation indices,
-    /// LAPACK convention). The pivot vector is small (O(min(m,n))) and
-    /// inherently host-readable, so we return it materialized on host rather
-    /// than inventing a typed-int GPU handle. Mirrors `torch.linalg.lu_factor`.
-    /// (#604)
+    /// CUDA-resident `DType::I32` tensor handle of length `min(m, n)`
+    /// (1-based row-permutation indices, LAPACK convention). Mirrors
+    /// `torch.linalg.lu_factor`. (#604)
     fn lu_factor_f32(
         &self,
         _a: &GpuBufferHandle,
         _m: usize,
         _n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
         Err(FerrotorchError::InvalidArgument {
             message: "lu_factor_f32 GPU op not yet implemented".into(),
         })
     }
 
     /// Non-throwing f32 LU factorization for determinant-family internals.
-    /// Returns `(LU_packed, pivots, info)`, where positive `info` is the first
-    /// zero pivot and does not discard the LU payload.
+    /// Returns `(LU_packed, pivots, info_tensor, host_info)`, where positive
+    /// `host_info` is the first zero pivot and does not discard the LU payload.
+    /// The pivot and info tensors stay CUDA-resident as `DType::I32` handles.
     fn lu_factor_ex_f32(
         &self,
-        a: &GpuBufferHandle,
+        _a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
-        let (lu, pivots) = self.lu_factor_f32(a, m, n)?;
-        Ok((lu, pivots, 0))
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle, i32)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "lu_factor_ex_f32 GPU op did not return an info tensor for LU shape ({m}, {n}); backend must override lu_factor_ex_f32"
+            ),
+        })
     }
 
     /// f64 counterpart of [`Self::lu_factor_f32`]. (#604)
@@ -5859,7 +5861,7 @@ pub trait GpuBackend: Send + Sync {
         _a: &GpuBufferHandle,
         _m: usize,
         _n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
         Err(FerrotorchError::InvalidArgument {
             message: "lu_factor_f64 GPU op not yet implemented".into(),
         })
@@ -5868,12 +5870,15 @@ pub trait GpuBackend: Send + Sync {
     /// f64 counterpart of [`Self::lu_factor_ex_f32`].
     fn lu_factor_ex_f64(
         &self,
-        a: &GpuBufferHandle,
+        _a: &GpuBufferHandle,
         m: usize,
         n: usize,
-    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
-        let (lu, pivots) = self.lu_factor_f64(a, m, n)?;
-        Ok((lu, pivots, 0))
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuBufferHandle, i32)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "lu_factor_ex_f64 GPU op did not return an info tensor for LU shape ({m}, {n}); backend must override lu_factor_ex_f64"
+            ),
+        })
     }
 
     /// GPU-resident least-squares solver via cuSOLVER `cusolverDnSSgels`
