@@ -5546,8 +5546,9 @@ pub fn cross_differentiable<T: Float>(
 /// - `p == ±inf`: gradient routed to the extremal-`|x|` elements with ties
 ///   split EVENLY — `dx = sgn(x) * [|x| == norm] * g / count(|x| == norm)`
 ///   (live probe: `x=[3,-3,1]`, `ord=inf` → `[0.5, -0.5, 0]`). NaN inputs
-///   count as ties iff the norm itself is NaN, per upstream's
-///   `isnan().logical_and_(norm.isnan())`.
+///   are included in the tie mask by upstream
+///   `self_abs.eq(norm).logical_or(self_abs.isnan())`; real-valued
+///   `torch.sign` maps those NaNs to a zero gradient contribution.
 /// - `p < 1` (incl. negative p): `dx = sgn(x)*|x|^(p-1) * g * norm^(1-p)`,
 ///   with the `x == 0 → 0` subgradient mask (live probe: `x=[0,1,4]`,
 ///   `ord=0.5` → `[0, 3, 1.5]`; `x=[1,-2,0]`, `ord=-1` → forward 0,
@@ -5567,11 +5568,11 @@ pub struct NormBackward<T: Float> {
     ord: f64,
 }
 
-/// torch's `sgn` for real floats: `0` at `0` (both signs), `NaN` at `NaN`,
-/// `±1` elsewhere. Distinct from `num_traits::Float::signum`, which maps
-/// `±0 → ±1`.
+/// torch's real-valued `sgn`/`sign`: `0` at `0` (both signs) and NaN, `±1`
+/// elsewhere. Distinct from `num_traits::Float::signum`, which maps
+/// `±0 → ±1` and propagates NaN.
 fn sgn<T: Float>(v: T) -> T {
-    if v == <T as num_traits::Zero>::zero() {
+    if v == <T as num_traits::Zero>::zero() || v.is_nan() {
         <T as num_traits::Zero>::zero()
     } else {
         v.signum()
@@ -5604,7 +5605,7 @@ impl<T: Float> GradFn<T> for NormBackward<T> {
         }
         let g: T = grad_output.item()?;
         let zero = <T as num_traits::Zero>::zero();
-        let xd = self.x.data()?;
+        let xd = self.x.data_vec()?;
         let norm = self.norm.item()?;
 
         let dx: Vec<T> = if p == 2.0 {
@@ -5692,7 +5693,10 @@ fn norm_sign_and_nonzero<T: Float>(
     let ones = crate::creation::ones_like(&abs)?;
     let nonzero = crate::bool_tensor::BoolTensor::ne(&abs, &zeros)?;
     let safe_abs = crate::grad_fns::comparison::where_bt(&nonzero, &abs, &ones)?;
-    Ok((x.div_t(&safe_abs)?, nonzero))
+    let raw_sign = x.div_t(&safe_abs)?;
+    let not_nan = crate::bool_tensor::BoolTensor::eq_t(&abs, &abs)?;
+    let sign = crate::grad_fns::comparison::where_bt(&not_nan, &raw_sign, &zeros)?;
+    Ok((sign, nonzero))
 }
 
 #[allow(
@@ -5727,7 +5731,8 @@ fn norm_backward_tensor<T: Float>(
     }
     if p.is_infinite() {
         let abs = x.abs_t()?;
-        let tie = crate::bool_tensor::BoolTensor::eq_t(&abs, norm)?;
+        let tie = crate::bool_tensor::BoolTensor::eq_t(&abs, norm)?
+            .or(&crate::bool_tensor::BoolTensor::ne(&abs, &abs)?)?;
         let tie_f = tie.to_float::<T>()?;
         let count = tie_f.count_nonzero_t()?.to_float::<T>()?;
         let (sign, _nonzero) = norm_sign_and_nonzero(x)?;

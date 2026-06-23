@@ -85,6 +85,41 @@ fn vector_norm_cpu_supports_half_and_bfloat_orders_like_torch() {
 }
 
 #[test]
+fn vector_norm_empty_nan_order_returns_zero_like_torch() {
+    // Live torch 2.11 oracle:
+    // torch.linalg.vector_norm(torch.tensor([], dtype=torch.float64), ord=float("nan")) -> 0.
+    let x = tensor_f64(&[], &[0], false);
+    let n = vector_norm(&x, f64::NAN).unwrap();
+    assert_eq!(n.shape(), &[]);
+    assert_eq!(n.data().unwrap(), &[0.0]);
+}
+
+#[test]
+fn vector_norm_cpu_accepts_noncontiguous_views() {
+    // PyTorch accepts strided inputs. The transposed view's logical sequence is
+    // [1, 4, 2, 5, 3, 6], so L1 is 21 and inf is 6.
+    let base = tensor_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+    let view = base.transpose(0, 1).unwrap();
+    assert!(!view.is_contiguous(), "test must exercise the view path");
+
+    assert_eq!(vector_norm(&view, 1.0).unwrap().data().unwrap(), &[21.0]);
+    assert_eq!(
+        vector_norm(&view, f64::INFINITY).unwrap().data().unwrap(),
+        &[6.0]
+    );
+}
+
+#[test]
+fn vector_norm_cpu_inf_nan_poison_is_not_erased_by_later_finite_values() {
+    // torch.linalg.vector_norm([nan, 3, 4], ord=±inf) returns nan. This guards
+    // against ordinary max/min folds that overwrite a prior NaN with a later
+    // finite value.
+    let x = tensor_f64(&[f64::NAN, 3.0, 4.0], &[3], false);
+    assert!(vector_norm(&x, f64::INFINITY).unwrap().data().unwrap()[0].is_nan());
+    assert!(vector_norm(&x, f64::NEG_INFINITY).unwrap().data().unwrap()[0].is_nan());
+}
+
+#[test]
 fn vector_norm_ord_zero_tracks_but_leaves_gradient_undefined() {
     let x = tensor_f32(&[1.0, 0.0, -2.0], &[3], true);
     let n = vector_norm(&x, 0.0).unwrap();
@@ -237,6 +272,45 @@ mod gpu {
             0.0,
             "zero p>2 grad",
         );
+    }
+
+    #[test]
+    fn vector_norm_cuda_nan_backward_matches_torch_sign_rules() {
+        let x1 = cuda_f32(&[f32::NAN, 3.0, -3.0, 0.0], &[4], true);
+        let n1 = vector_norm(&x1, 1.0).unwrap();
+        assert_eq!(n1.device(), Device::Cuda(0));
+        assert!(n1.data_vec().unwrap()[0].is_nan());
+        n1.backward().unwrap();
+        let g1 = x1.grad().unwrap().unwrap();
+        assert_eq!(g1.device(), Device::Cuda(0));
+        assert_close_f32(
+            &g1.data_vec().unwrap(),
+            &[0.0, 1.0, -1.0, 0.0],
+            0.0,
+            "cuda p=1 NaN sign",
+        );
+
+        let xi = cuda_f32(&[f32::NAN, 3.0, -3.0, 0.0], &[4], true);
+        let ni = vector_norm(&xi, f64::INFINITY).unwrap();
+        assert_eq!(ni.device(), Device::Cuda(0));
+        assert!(ni.data_vec().unwrap()[0].is_nan());
+        ni.backward().unwrap();
+        let gi = xi.grad().unwrap().unwrap();
+        assert_eq!(gi.device(), Device::Cuda(0));
+        assert_close_f32(
+            &gi.data_vec().unwrap(),
+            &[0.0, 0.0, 0.0, 0.0],
+            0.0,
+            "cuda p=inf NaN sign",
+        );
+    }
+
+    #[test]
+    fn vector_norm_cuda_empty_nan_order_returns_zero_resident() {
+        let x = cuda_f32(&[], &[0], false);
+        let n = vector_norm(&x, f64::NAN).unwrap();
+        assert_eq!(n.device(), Device::Cuda(0));
+        assert_eq!(n.data_vec().unwrap(), &[0.0]);
     }
 
     #[test]

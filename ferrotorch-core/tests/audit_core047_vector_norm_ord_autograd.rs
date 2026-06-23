@@ -55,6 +55,18 @@ fn check_grad_f64(x: &Tensor<f64>, expected: &[f64], label: &str) {
     }
 }
 
+fn check_grad_f64_nan(x: &Tensor<f64>, label: &str) {
+    let g = x
+        .grad()
+        .unwrap()
+        .unwrap_or_else(|| panic!("{label}: no grad reached the leaf"));
+    let got = g.data().unwrap();
+    assert!(
+        got.iter().all(|v| v.is_nan()),
+        "{label}: torch oracle is all NaN, got {got:?}"
+    );
+}
+
 fn fwd_close(n: &Tensor<f64>, expected: f64, label: &str) {
     let v = n.data().unwrap()[0];
     assert!(
@@ -77,6 +89,22 @@ fn ord_1_sign_grad() {
     fwd_close(&n, 9.0, "ord=1");
     n.backward().unwrap();
     check_grad_f64(&x, &[1.0, -1.0, 1.0, -1.0, 0.0], "ord=1 grad");
+}
+
+/// Real-valued torch.sign maps NaN to zero, so p=1 does not propagate a NaN
+/// through the sign VJP. Live oracle:
+/// ```python
+/// x = torch.tensor([nan, 3., -3., 0.], dtype=torch.float64, requires_grad=True)
+/// torch.linalg.vector_norm(x, 1.0).backward()
+/// x.grad   # [0., 1., -1., 0.]
+/// ```
+#[test]
+fn ord_1_nan_sign_matches_torch() {
+    let x = leaf_f64(&[f64::NAN, 3.0, -3.0, 0.0]);
+    let n = vector_norm(&x, 1.0).unwrap();
+    assert!(n.data().unwrap()[0].is_nan(), "ord=1 NaN forward");
+    n.backward().unwrap();
+    check_grad_f64(&x, &[0.0, 1.0, -1.0, 0.0], "ord=1 NaN sign grad");
 }
 
 /// ord=3 (general p>2 branch) — `dx = x*|x|^(p-2) * g / norm^(p-1)`.
@@ -213,6 +241,22 @@ fn ord_inf_tie_split() {
     fwd_close(&n, 3.0, "ord=inf");
     n.backward().unwrap();
     check_grad_f64(&x, &[0.5, -0.5, 0.0], "ord=inf tie grad");
+}
+
+/// Upstream's isinf branch includes `self_abs.isnan()` in the tie mask, but
+/// then multiplies by `torch.sign`, which maps real NaNs to zero. Live oracle:
+/// ```python
+/// x = torch.tensor([nan, 3., -3., 0.], dtype=torch.float64, requires_grad=True)
+/// torch.linalg.vector_norm(x, float('inf')).backward()
+/// x.grad   # [0., 0., -0., 0.]
+/// ```
+#[test]
+fn ord_inf_nan_tie_has_zero_sign_contribution() {
+    let x = leaf_f64(&[f64::NAN, 3.0, -3.0, 0.0]);
+    let n = vector_norm(&x, f64::INFINITY).unwrap();
+    assert!(n.data().unwrap()[0].is_nan(), "ord=inf NaN forward");
+    n.backward().unwrap();
+    check_grad_f64(&x, &[0.0, 0.0, 0.0, 0.0], "ord=inf NaN grad");
 }
 
 /// ord=inf with a non-unit upstream gradient — the tie split scales.
@@ -374,6 +418,22 @@ fn ord_2_unchanged() {
     fwd_close(&n, 5.0, "ord=2");
     n.backward().unwrap();
     check_grad_f64(&x, &[0.6, 0.8], "ord=2 grad");
+}
+
+/// For p=2 a NaN norm propagates through the whole VJP. This guards the
+/// p=2 branch against over-applying the zero-norm mask. Live oracle:
+/// ```python
+/// x = torch.tensor([nan, 3., -3., 0.], dtype=torch.float64, requires_grad=True)
+/// torch.linalg.vector_norm(x, 2.0).backward()
+/// x.grad   # [nan, nan, nan, nan]
+/// ```
+#[test]
+fn ord_2_nan_norm_propagates_to_all_grad_entries() {
+    let x = leaf_f64(&[f64::NAN, 3.0, -3.0, 0.0]);
+    let n = vector_norm(&x, 2.0).unwrap();
+    assert!(n.data().unwrap()[0].is_nan(), "ord=2 NaN forward");
+    n.backward().unwrap();
+    check_grad_f64_nan(&x, "ord=2 NaN grad");
 }
 
 /// f32 lane spot check, ord=3. Live oracle:

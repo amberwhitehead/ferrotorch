@@ -165,7 +165,7 @@ fn tensor_to_array2_f64<T: Float>(
             message: format!("expected 2-D tensor, got {shape:?}"),
         });
     }
-    let data: Vec<f64> = t.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let data: Vec<f64> = t.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
     ferray_core::Array::from_vec(ferray_core::Ix2::new([shape[0], shape[1]]), data)
         .map_err(FerrotorchError::Ferray)
 }
@@ -181,7 +181,7 @@ fn tensor_to_array2_f32<T: Float>(
         });
     }
     let data: Vec<f32> = t
-        .data()?
+        .data_vec()?
         .iter()
         .map(|&v| v.to_f64().unwrap() as f32)
         .collect();
@@ -193,7 +193,7 @@ fn tensor_to_array2_f32<T: Float>(
 fn tensor_to_arraydyn_f64<T: Float>(
     t: &Tensor<T>,
 ) -> FerrotorchResult<ferray_core::Array<f64, ferray_core::IxDyn>> {
-    let data: Vec<f64> = t.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let data: Vec<f64> = t.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
     ferray_core::Array::from_vec(ferray_core::IxDyn::new(t.shape()), data)
         .map_err(FerrotorchError::Ferray)
 }
@@ -203,7 +203,7 @@ fn tensor_to_arraydyn_f32<T: Float>(
     t: &Tensor<T>,
 ) -> FerrotorchResult<ferray_core::Array<f32, ferray_core::IxDyn>> {
     let data: Vec<f32> = t
-        .data()?
+        .data_vec()?
         .iter()
         .map(|&v| v.to_f64().unwrap() as f32)
         .collect();
@@ -2778,23 +2778,6 @@ fn rust_lstsq_rank_tensor(driver: LstsqDriver, rank: usize) -> FerrotorchResult<
     }
 }
 
-fn rust_lstsq_gels_rank_check(
-    driver: LstsqDriver,
-    rank: usize,
-    dims: LstsqDims,
-) -> FerrotorchResult<()> {
-    if driver == LstsqDriver::Gels && rank < dims.n {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "lstsq(gels): the least-squares solution could not be computed \
-                 because the input matrix does not have full rank (rank {rank} < n {})",
-                dims.n
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn rust_lstsq_f64<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
@@ -2810,7 +2793,6 @@ fn rust_lstsq_f64<T: Float>(
     let b_arr = tensor_to_arraydyn_f64(b)?;
     let (sol_arr, residuals_arr, rank, sv_arr) =
         ferray_linalg::lstsq(&a_arr, &b_arr, rcond).map_err(FerrotorchError::Ferray)?;
-    rust_lstsq_gels_rank_check(driver, rank, dims)?;
 
     let sol = Tensor::from_storage(
         TensorStorage::cpu(slice_to_vec::<T>(sol_arr.as_slice().unwrap())),
@@ -2859,7 +2841,6 @@ fn rust_lstsq_f32<T: Float>(
     let rcond = rcond.map(|v| v as f32);
     let (sol_arr, residuals_arr, rank, sv_arr) =
         ferray_linalg::lstsq(&a_arr, &b_arr, rcond).map_err(FerrotorchError::Ferray)?;
-    rust_lstsq_gels_rank_check(driver, rank, dims)?;
 
     let sol = Tensor::from_storage(
         TensorStorage::cpu(slice_f32_to_vec::<T>(sol_arr.as_slice().unwrap())),
@@ -3548,29 +3529,7 @@ pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Te
         return crate::grad_fns::linalg::vector_norm_differentiable(input, ord);
     }
 
-    if input.is_cuda() || is_f16::<T>() || is_bf16::<T>() {
-        return vector_norm_composite(input, ord);
-    }
-
-    let order = float_to_norm_order(ord);
-    if is_f32::<T>() {
-        let arr = tensor_to_arraydyn_f32(input)?;
-        let r = ferray_linalg::vector_norm(&arr, order, None, false)
-            .map_err(FerrotorchError::Ferray)?;
-        // Result is a 0-d (or 1-d singleton) array.
-        let val = T::from(r.as_slice().unwrap()[0]).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
-    } else if is_f64::<T>() {
-        let arr = tensor_to_arraydyn_f64(input)?;
-        let r = ferray_linalg::vector_norm(&arr, order, None, false)
-            .map_err(FerrotorchError::Ferray)?;
-        let val = T::from(r.as_slice().unwrap()[0]).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
-    } else {
-        Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
-        })
-    }
+    vector_norm_composite(input, ord)
 }
 
 #[allow(
@@ -3581,6 +3540,14 @@ pub(crate) fn vector_norm_composite<T: Float>(
     input: &Tensor<T>,
     ord: f64,
 ) -> FerrotorchResult<Tensor<T>> {
+    if input.numel() == 0 && ord.is_nan() {
+        return scalar_on_device(
+            <T as num_traits::Zero>::zero(),
+            input.device(),
+            "linalg.vector_norm",
+        );
+    }
+
     if input.numel() == 0 && (ord < 0.0 || ord == f64::INFINITY) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -4741,8 +4708,8 @@ pub fn solve_triangular<T: Float>(
 
     // Materialize to f64 internally; the existing helpers use the same
     // strategy. Final cast back to T.
-    let a_f64: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
-    let mut x: Vec<f64> = b.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let a_f64: Vec<f64> = a.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let mut x: Vec<f64> = b.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
 
     // Effective `upper`: when transposed, an upper-triangular A becomes
     // lower-triangular and vice versa. Fold it here so the loop only handles
@@ -4829,7 +4796,7 @@ pub fn ldl_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tenso
     }
     reject_forward_only_autograd("ldl_factor", &[a])?;
     let n = a.shape()[0];
-    let a_f64: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let a_f64: Vec<f64> = a.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
 
     let mut l = vec![0.0f64; n * n];
     let mut d = vec![0.0f64; n];
@@ -4902,8 +4869,8 @@ pub fn ldl_solve<T: Float>(
     )?;
     // Step 2: scale by D^{-1}: z_i = y_i / d_i (broadcast across columns of y).
     let n = d.shape()[0];
-    let d_data = d.data()?.to_vec();
-    let y_data = y.data()?.to_vec();
+    let d_data = d.data_vec()?;
+    let y_data = y.data_vec()?;
     let z_shape = y.shape().to_vec();
     let k = if y.ndim() == 1 { 1 } else { y.shape()[1] };
     let mut z = vec![T::from(0.0).unwrap(); y_data.len()];
@@ -4962,7 +4929,7 @@ pub fn householder_product<T: Float>(
         return Ok(q);
     }
     // Slice the leading k columns of the row-major [m, m] product.
-    let q_data = q.data()?;
+    let q_data = q.data_vec()?;
     let mut out = Vec::with_capacity(m * k);
     for i in 0..m {
         for j in 0..k {
@@ -5014,8 +4981,12 @@ pub fn householder_product_full<T: Float>(
     }
     reject_forward_only_autograd("householder_product_full", &[v, tau])?;
 
-    let v_f64: Vec<f64> = v.data()?.iter().map(|&x| x.to_f64().unwrap()).collect();
-    let tau_f64: Vec<f64> = tau.data()?.iter().map(|&x| x.to_f64().unwrap()).collect();
+    let v_f64: Vec<f64> = v.data_vec()?.iter().map(|&x| x.to_f64().unwrap()).collect();
+    let tau_f64: Vec<f64> = tau
+        .data_vec()?
+        .iter()
+        .map(|&x| x.to_f64().unwrap())
+        .collect();
 
     // Initialize Q = I_m (row-major).
     let mut q = vec![0.0f64; m * m];
@@ -5086,7 +5057,7 @@ pub fn matrix_exp<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if n == 0 {
         return Tensor::from_storage(TensorStorage::cpu(Vec::<T>::new()), vec![0, 0], false);
     }
-    let a_data: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    let a_data: Vec<f64> = a.data_vec()?.iter().map(|&v| v.to_f64().unwrap()).collect();
     // Trivial 1x1 case mirrors upstream `linalg_matrix_exp` (pytorch
     // `aten/src/ATen/native/LinearAlgebra.cpp:2795`: `n == 1` returns
     // `a.exp()`). Exact for extreme magnitudes — `exp(1e20) = inf`,
