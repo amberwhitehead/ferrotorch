@@ -140,7 +140,7 @@ fn cpu_gelss_rank_deficient_omits_residuals_and_reports_zero_singular_value() {
 }
 
 #[test]
-fn cpu_gels_rank_deficient_reports_lapack_failure_instead_of_fake_rank() {
+fn cpu_gels_rank_deficient_reports_full_rank_failure_instead_of_fake_rank() {
     let a = t(&[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0], &[4, 2]);
     let b = t(&[1.0, 2.0, 3.0, 4.0], &[4, 1]);
 
@@ -151,8 +151,48 @@ fn cpu_gels_rank_deficient_reports_lapack_failure_instead_of_fake_rank() {
             FerrotorchError::InvalidArgument { ref message }
                 if message.contains("does not have full rank")
         ),
-        "expected full-rank LAPACK failure, got {err:?}"
+        "expected full-rank failure, got {err:?}"
     );
+}
+
+#[test]
+fn cpu_lstsq_underdetermined_matches_pytorch_minimum_norm_contract() {
+    let a = t(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[2, 3]);
+    let b = t(&[2.0, 3.0], &[2]);
+
+    for (driver, expected_rank, expected_sv) in [
+        (None, Some(2_i64), Vec::new()),
+        (Some(LstsqDriver::Gels), None, Vec::new()),
+        (Some(LstsqDriver::Gelsy), Some(2_i64), Vec::new()),
+        (Some(LstsqDriver::Gelsd), Some(2_i64), vec![1.0, 1.0]),
+        (Some(LstsqDriver::Gelss), Some(2_i64), vec![1.0, 1.0]),
+    ] {
+        let (sol, residuals, rank, sv) = linalg::lstsq_with_driver(&a, &b, None, driver).unwrap();
+        assert_close(
+            &sol.data_vec().unwrap(),
+            &[2.0, 3.0, 0.0],
+            1e-12,
+            "wide solution",
+        );
+        assert_eq!(sol.shape(), &[3]);
+        assert_eq!(residuals.shape(), &[0]);
+        match expected_rank {
+            Some(rank_value) => {
+                assert_eq!(rank.shape(), &[] as &[usize]);
+                assert_eq!(rank.data().unwrap(), &[rank_value]);
+            }
+            None => {
+                assert_eq!(rank.shape(), &[0]);
+                assert_eq!(rank.data().unwrap(), &[] as &[i64]);
+            }
+        }
+        assert_close(
+            &sv.data_vec().unwrap(),
+            &expected_sv,
+            1e-12,
+            "wide singular values",
+        );
+    }
 }
 
 #[cfg(feature = "gpu")]

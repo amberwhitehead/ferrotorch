@@ -81,7 +81,6 @@ faer = "0.24"
 once_cell = "1"
 rustc-hash = "2"
 tracing = { workspace = true }
-libloading = "0.8"
 
 # Conformance suite scaffolding (Phase 2.0 — issue #759):
 #   * `syn`/`quote` parse the public surface of `src/lib.rs` (and every module
