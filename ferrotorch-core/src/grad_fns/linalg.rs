@@ -2431,8 +2431,8 @@ impl<T: Float> GradFn<T> for TraceForward<T> {
 ///
 /// VJP (`tools/autograd/derivatives.yaml:275-276`, `vec1`/`vec2` of `addr`,
 /// which is `outer` composed with `addmm`-style scaling):
-/// - `da = grad_C @ b`     (mv: `[m,n] @ [n] -> [m]`)
-/// - `db = grad_C^T @ a`   (mv: `[n,m] @ [m] -> [n]`)
+/// - `da = sum(grad_C * b.reshape(1, n), dim=1)`
+/// - `db = sum(grad_C * a.reshape(m, 1), dim=0)`
 #[derive(Debug)]
 pub struct OuterBackward<T: Float> {
     a: Tensor<T>,
@@ -2447,20 +2447,65 @@ impl<T: Float> OuterBackward<T> {
 
 impl<T: Float> GradFn<T> for OuterBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let grad_a = if self.a.requires_grad() {
-            // da = grad_C @ b
-            Some(linalg::mv(grad_output, &self.b)?)
-        } else {
-            None
-        };
-        let grad_b = if self.b.requires_grad() {
-            // db = grad_C^T @ a
-            let gt = mat_transpose(grad_output)?;
-            Some(linalg::mv(&gt, &self.a)?)
-        } else {
-            None
-        };
-        Ok(vec![grad_a, grad_b])
+        crate::autograd::no_grad::no_grad(|| {
+            if self.a.ndim() != 1 || self.b.ndim() != 1 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "OuterBackward expects 1-D saved inputs, got {:?} and {:?}",
+                        self.a.shape(),
+                        self.b.shape()
+                    ),
+                });
+            }
+            if self.a.device() != self.b.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.a.device(),
+                    got: self.b.device(),
+                });
+            }
+            if grad_output.device() != self.a.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.a.device(),
+                    got: grad_output.device(),
+                });
+            }
+            let expected = vec![self.a.shape()[0], self.b.shape()[0]];
+            if grad_output.shape() != expected.as_slice() {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "OuterBackward expected grad_output shape {:?}, got {:?}",
+                        expected,
+                        grad_output.shape()
+                    ),
+                });
+            }
+
+            let grad_a = if self.a.requires_grad() {
+                let n = isize::try_from(self.b.shape()[0]).map_err(|_| {
+                    FerrotorchError::InvalidArgument {
+                        message: "OuterBackward: b length exceeds isize::MAX".into(),
+                    }
+                })?;
+                let b_row = crate::grad_fns::shape::reshape(&self.b, &[1, n])?;
+                let weighted = crate::grad_fns::arithmetic::mul(grad_output, &b_row)?;
+                Some(crate::grad_fns::reduction::sum_dim(&weighted, 1, false)?)
+            } else {
+                None
+            };
+            let grad_b = if self.b.requires_grad() {
+                let m = isize::try_from(self.a.shape()[0]).map_err(|_| {
+                    FerrotorchError::InvalidArgument {
+                        message: "OuterBackward: a length exceeds isize::MAX".into(),
+                    }
+                })?;
+                let a_col = crate::grad_fns::shape::reshape(&self.a, &[m, 1])?;
+                let weighted = crate::grad_fns::arithmetic::mul(grad_output, &a_col)?;
+                Some(crate::grad_fns::reduction::sum_dim(&weighted, 0, false)?)
+            } else {
+                None
+            };
+            Ok(vec![grad_a, grad_b])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -2653,6 +2698,107 @@ fn det_cofactor_matrix<T: Float>(data: &[T], n: usize) -> Vec<T> {
     cofactors
 }
 
+fn checked_isize(value: usize, op: &str, what: &str) -> FerrotorchResult<isize> {
+    isize::try_from(value).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: {what} {value} exceeds isize::MAX"),
+    })
+}
+
+fn remove_matrix_index<T: Float>(
+    input: &Tensor<T>,
+    dim: usize,
+    index: usize,
+    op: &str,
+) -> FerrotorchResult<Tensor<T>> {
+    let size = input
+        .shape()
+        .get(dim)
+        .copied()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: dimension {dim} is out of range for {:?}",
+                input.shape()
+            ),
+        })?;
+    if index >= size {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: index {index} is out of bounds for dimension size {size}"),
+        });
+    }
+
+    let mut pieces = Vec::with_capacity(2);
+    if index > 0 {
+        pieces.push(input.narrow(dim, 0, index)?);
+    }
+    if index + 1 < size {
+        pieces.push(input.narrow(dim, index + 1, size - index - 1)?);
+    }
+
+    match pieces.len() {
+        0 => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: cannot remove the only element from dimension {dim}"),
+        }),
+        1 => Ok(pieces.remove(0)),
+        _ => crate::grad_fns::shape::cat(&pieces, checked_isize(dim, op, "dimension")?),
+    }
+}
+
+fn tensor_minor<T: Float>(
+    input: &Tensor<T>,
+    row: usize,
+    col: usize,
+    op: &str,
+) -> FerrotorchResult<Tensor<T>> {
+    let without_row = remove_matrix_index(input, 0, row, op)?;
+    remove_matrix_index(&without_row, 1, col, op)
+}
+
+fn det_cofactor_matrix_tensor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    const OP: &str = "slogdet backward";
+    let shape = input.shape();
+    if shape.len() != 2 || shape[0] != shape[1] {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{OP}: expected a square 2-D input, got {shape:?}"),
+        });
+    }
+
+    let n = shape[0];
+    if n == 0 {
+        return crate::creation::zeros_like(input);
+    }
+    if n == 1 {
+        return Tensor::from_storage(
+            TensorStorage::on_device(vec![<T as num_traits::One>::one()], input.device()).map_err(
+                |err| FerrotorchError::InvalidArgument {
+                    message: format!("{OP}: failed to create 1x1 cofactor on device: {err}"),
+                },
+            )?,
+            vec![1, 1],
+            false,
+        );
+    }
+
+    let mut rows = Vec::with_capacity(n);
+    let n_isize = checked_isize(n, OP, "matrix size")?;
+    for row in 0..n {
+        let mut cols = Vec::with_capacity(n);
+        for col in 0..n {
+            let minor = tensor_minor(input, row, col, OP)?;
+            let det = linalg_fwd::det(&minor)?;
+            let cofactor = if (row + col).is_multiple_of(2) {
+                det
+            } else {
+                det.neg_t()?
+            };
+            cols.push(crate::grad_fns::shape::reshape(&cofactor, &[1])?);
+        }
+        let row_tensor = crate::grad_fns::shape::cat(&cols, 0)?;
+        rows.push(crate::grad_fns::shape::reshape(&row_tensor, &[1, n_isize])?);
+    }
+
+    crate::grad_fns::shape::cat(&rows, 0)
+}
+
 /// Backward for `d = det(A)`.
 ///
 /// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4373` `linalg_det_backward`,
@@ -2668,28 +2814,41 @@ pub struct LinalgDetBackward<T: Float> {
     /// tracked inputs; PyTorch stores LU metadata and defers solve work to
     /// backward, so ferrotorch stores the input edge and computes lazily.
     input: Tensor<T>,
-    /// Retained scalar determinant value.
-    det: T,
+    /// Retained scalar determinant value. Kept as a tensor so CUDA backward
+    /// can multiply by the resident forward result without a host scalar read.
+    det: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for LinalgDetBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let g: T = grad_output.item()?;
+        let grad_output = if self.input.is_cuda() && !grad_output.is_cuda() {
+            grad_output.to(self.input.device())?
+        } else {
+            if grad_output.device() != self.input.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.input.device(),
+                    got: grad_output.device(),
+                });
+            }
+            grad_output.clone()
+        };
         let n = self.input.shape()[0];
         let grad_a = if n == 0 {
-            Tensor::from_storage(TensorStorage::cpu(Vec::new()), vec![0, 0], false)?
+            crate::creation::zeros_like(&self.input)?
         } else if n == 1 {
-            Tensor::from_storage(TensorStorage::cpu(vec![g]), vec![1, 1], false)?
+            grad_output.view_reshape(vec![1, 1])?
         } else {
             match crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(&self.input)) {
                 Ok(inv) => {
                     let inv_t = mat_transpose(&inv)?;
-                    let scale = g * self.det;
-                    let data = inv_t.data_vec()?;
-                    let scaled: Vec<T> = data.iter().map(|&v| scale * v).collect();
-                    Tensor::from_storage(TensorStorage::cpu(scaled), inv_t.shape().to_vec(), false)?
+                    let scale = grad_output.mul_t(&self.det)?;
+                    inv_t.mul_t(&scale)?
                 }
-                Err(_) if crate::autograd::higher_order::is_create_graph_enabled() => {
+                Err(_)
+                    if crate::autograd::higher_order::is_create_graph_enabled()
+                        && !self.input.is_cuda() =>
+                {
+                    let g = grad_output.item()?;
                     let data = self.input.data_vec()?;
                     let scaled: Vec<T> = det_cofactor_matrix(&data, n)
                         .into_iter()
@@ -2697,11 +2856,7 @@ impl<T: Float> GradFn<T> for LinalgDetBackward<T> {
                         .collect();
                     Tensor::from_storage(TensorStorage::cpu(scaled), vec![n, n], false)?
                 }
-                Err(_) => Tensor::from_storage(
-                    TensorStorage::cpu(vec![<T as num_traits::Zero>::zero(); n * n]),
-                    vec![n, n],
-                    false,
-                )?,
+                Err(_) => crate::creation::zeros_like(&self.input)?,
             }
         };
         Ok(vec![Some(grad_a)])
@@ -2744,12 +2899,11 @@ impl<T: Float> GradFn<T> for DetForward<T> {
 pub fn det_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::det(a))?;
     if is_grad_enabled() && a.requires_grad() {
-        let det_val: T = result.item()?;
         let grad_fn = Arc::new(DetForward {
             input: a.clone(),
             inner: LinalgDetBackward {
                 input: a.clone(),
-                det: det_val,
+                det: result.clone(),
             },
         });
         let (storage, shape) = result.into_storage_and_shape()?;
@@ -3245,20 +3399,34 @@ pub struct SlogdetBackward<T: Float> {
 impl<T: Float> GradFn<T> for SlogdetBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // grad_output is the upstream gradient on `logabsdet` (a scalar).
-        let g: T = grad_output.item()?;
+        let grad_output = if self.input.is_cuda() && !grad_output.is_cuda() {
+            grad_output.to(self.input.device())?
+        } else {
+            if grad_output.device() != self.input.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.input.device(),
+                    got: grad_output.device(),
+                });
+            }
+            grad_output.clone()
+        };
         let grad_a = match crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(&self.input)) {
             Ok(inv) => {
                 let inv_t = mat_transpose(&inv)?;
-                let data = inv_t.data_vec()?;
-                let scaled: Vec<T> = data.iter().map(|&v| g * v).collect();
-                Tensor::from_storage(TensorStorage::cpu(scaled), inv_t.shape().to_vec(), false)?
+                inv_t.mul_t(&grad_output)?
             }
             Err(err) if crate::autograd::higher_order::is_create_graph_enabled() => {
                 // PyTorch's higher-order slogdet branch recomputes a solve and
                 // raises on singular matrices; do not hide that nonsmooth case.
                 return Err(err);
             }
+            Err(_) if self.input.is_cuda() => crate::autograd::no_grad::no_grad(|| {
+                let det = linalg_fwd::det(&self.input)?;
+                let cofactors = det_cofactor_matrix_tensor(&self.input)?;
+                cofactors.div_t(&det)?.mul_t(&grad_output)
+            })?,
             Err(_) => {
+                let g: T = grad_output.item()?;
                 let n = self.input.shape()[0];
                 let data = self.input.data_vec()?;
                 let det =

@@ -5840,6 +5840,19 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Non-throwing f32 LU factorization for determinant-family internals.
+    /// Returns `(LU_packed, pivots, info)`, where positive `info` is the first
+    /// zero pivot and does not discard the LU payload.
+    fn lu_factor_ex_f32(
+        &self,
+        a: &GpuBufferHandle,
+        m: usize,
+        n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
+        let (lu, pivots) = self.lu_factor_f32(a, m, n)?;
+        Ok((lu, pivots, 0))
+    }
+
     /// f64 counterpart of [`Self::lu_factor_f32`]. (#604)
     fn lu_factor_f64(
         &self,
@@ -5850,6 +5863,17 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::InvalidArgument {
             message: "lu_factor_f64 GPU op not yet implemented".into(),
         })
+    }
+
+    /// f64 counterpart of [`Self::lu_factor_ex_f32`].
+    fn lu_factor_ex_f64(
+        &self,
+        a: &GpuBufferHandle,
+        m: usize,
+        n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>, i32)> {
+        let (lu, pivots) = self.lu_factor_f64(a, m, n)?;
+        Ok((lu, pivots, 0))
     }
 
     /// GPU-resident least-squares solver via cuSOLVER `cusolverDnSSgels`

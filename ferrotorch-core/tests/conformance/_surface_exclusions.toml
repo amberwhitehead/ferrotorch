@@ -1801,18 +1801,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was 
 tracking_issue = "#1916"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::OuterBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::OuterBackward <T>::new"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::PinvBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
@@ -1838,12 +1826,6 @@ tracking_issue = "#1916"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::cholesky_differentiable"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::det_differentiable"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
 tracking_issue = "#1916"
@@ -1922,12 +1904,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was 
 tracking_issue = "#1916"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::outer_differentiable"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::pinv_differentiable"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
@@ -1935,12 +1911,6 @@ tracking_issue = "#1916"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::qr_differentiable"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::slogdet_differentiable"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
 tracking_issue = "#1916"

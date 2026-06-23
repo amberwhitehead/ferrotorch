@@ -593,6 +593,18 @@ fn full_like_on_device<T: Float>(
     }
 }
 
+fn scalar_on_device<T: Float>(value: T, device: Device, op: &str) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], device).map_err(|err| {
+            FerrotorchError::InvalidArgument {
+                message: format!("{op}: failed to create scalar on {device}: {err}"),
+            }
+        })?,
+        vec![],
+        false,
+    )
+}
+
 #[derive(Debug, Clone)]
 struct CpuLuFactor<T: Float> {
     packed: Vec<T>,
@@ -614,6 +626,89 @@ fn parse_zero_pivot_info(message: &str) -> Option<i32> {
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     let info: i32 = digits.parse().ok()?;
     (info > 0).then_some(info)
+}
+
+fn pivot_sign_from_lapack_pivots(pivots: &[i32], rows: usize, op: &str) -> FerrotorchResult<i32> {
+    let mut swaps = 0usize;
+    for (i, &pivot) in pivots.iter().enumerate() {
+        if pivot <= 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: pivot at index {i} is not 1-based positive: {pivot}"),
+            });
+        }
+        let pivot_row =
+            usize::try_from(pivot - 1).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!("{op}: pivot at index {i} cannot be represented as usize"),
+            })?;
+        if pivot_row >= rows {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: pivot at index {i} points to row {pivot_row}, outside {rows} rows"
+                ),
+            });
+        }
+        if pivot_row != i {
+            swaps += 1;
+        }
+    }
+    Ok(if swaps.is_multiple_of(2) { 1 } else { -1 })
+}
+
+struct LuFactorWithInfo<T: Float> {
+    lu: Tensor<T>,
+    pivots: Vec<i32>,
+    info: i32,
+}
+
+fn lu_factor_with_info<T: Float>(a: &Tensor<T>, op: &str) -> FerrotorchResult<LuFactorWithInfo<T>> {
+    let shape = a.shape();
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: LU factorization requires a 2-D tensor, got {shape:?}"),
+        });
+    }
+    let (m, n) = (shape[0], shape[1]);
+    let k = m.min(n);
+
+    if k == 0 {
+        return Ok(LuFactorWithInfo {
+            lu: full_like_on_device(shape, <T as num_traits::Zero>::zero(), a.device(), op)?,
+            pivots: Vec::new(),
+            info: 0,
+        });
+    }
+
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let packed = a.contiguous()?;
+        let (lu_h, pivots, info) = if is_f32::<T>() {
+            backend.lu_factor_ex_f32(packed.gpu_handle()?, m, n)?
+        } else {
+            backend.lu_factor_ex_f64(packed.gpu_handle()?, m, n)?
+        };
+        return Ok(LuFactorWithInfo {
+            lu: Tensor::from_storage(TensorStorage::gpu(lu_h), vec![m, n], false)?,
+            pivots,
+            info,
+        });
+    }
+    if a.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "lu_factor" });
+    }
+
+    if !(is_f32::<T>() || is_f64::<T>()) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: LU factorization requires f32 or f64"),
+        });
+    }
+
+    let factor = cpu_lu_factor_packed(a.data_vec()?, m, n, op)?;
+    Ok(LuFactorWithInfo {
+        lu: Tensor::from_storage(TensorStorage::cpu(factor.packed), vec![m, n], false)?,
+        pivots: factor.pivots,
+        info: factor.info,
+    })
 }
 
 /// Pure-Rust LAPACK GETRF-style factorization in row-major logical order.
@@ -1298,16 +1393,74 @@ fn solve_batched_composed<T: Float>(
 // Determinant
 // ---------------------------------------------------------------------------
 
+fn det_from_lu_factor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let n = input.shape()[0];
+    if n == 0 {
+        return scalar_on_device(<T as num_traits::One>::one(), input.device(), "det");
+    }
+
+    let LuFactorWithInfo { lu, pivots, .. } = lu_factor_with_info(input, "det")?;
+    let sign_value =
+        T::from(pivot_sign_from_lapack_pivots(&pivots, n, "det")?).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "det: pivot parity sign is not representable in tensor dtype".into(),
+            }
+        })?;
+    let diag = diagonal(&lu, 0)?;
+    let diag_product = crate::grad_fns::reduction::prod(&diag)?;
+    let sign = scalar_on_device(sign_value, input.device(), "det")?;
+    diag_product.mul_t(&sign)
+}
+
+fn slogdet_from_lu_factor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    let n = input.shape()[0];
+    if n == 0 {
+        return Ok((
+            scalar_on_device(<T as num_traits::One>::one(), input.device(), "slogdet")?,
+            scalar_on_device(<T as num_traits::Zero>::zero(), input.device(), "slogdet")?,
+        ));
+    }
+
+    let LuFactorWithInfo { lu, pivots, info } = lu_factor_with_info(input, "slogdet")?;
+    let pivot_sign =
+        T::from(pivot_sign_from_lapack_pivots(&pivots, n, "slogdet")?).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "slogdet: pivot parity sign is not representable in tensor dtype".into(),
+            }
+        })?;
+    let diag = diagonal(&lu, 0)?;
+    let diag_product = crate::grad_fns::reduction::prod(&diag)?;
+    let det_value =
+        diag_product.mul_t(&scalar_on_device(pivot_sign, input.device(), "slogdet")?)?;
+    if info > 0 {
+        return Ok((
+            det_value,
+            scalar_on_device(
+                <T as num_traits::Float>::neg_infinity(),
+                input.device(),
+                "slogdet",
+            )?,
+        ));
+    }
+    let diag_sign = diag.sign_t()?;
+    let sign = crate::grad_fns::reduction::prod(&diag_sign)?.mul_t(&scalar_on_device(
+        pivot_sign,
+        input.device(),
+        "slogdet",
+    )?)?;
+    let logabsdet = diag.abs_t()?.log_t()?.sum_all()?;
+    Ok((sign, logabsdet))
+}
+
 /// Matrix determinant of a square 2-D tensor.
 ///
 /// Returns a scalar tensor.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// Autograd-aware: when grad tracking is active for `input`, this routes
 /// through `crate::grad_fns::linalg::det_differentiable` (the invertible-branch
 /// VJP `dA = grad * det(A) * inv(A)^T`).
 pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(input, "det")?;
     let shape = input.shape();
     if shape.len() != 2 || shape[0] != shape[1] {
         return Err(FerrotorchError::InvalidArgument {
@@ -1322,21 +1475,16 @@ pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return crate::grad_fns::linalg::det_differentiable(input);
     }
 
-    if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(input)?;
-        let d: f32 = ferray_linalg::det(&arr).map_err(FerrotorchError::Ferray)?;
-        let val = T::from(d).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
-    } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(input)?;
-        let d: f64 = ferray_linalg::det(&arr).map_err(FerrotorchError::Ferray)?;
-        let val = T::from(d).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
-    } else {
-        Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
-        })
+    if is_f32::<T>() || is_f64::<T>() {
+        return det_from_lu_factor(input);
     }
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "det" });
+    }
+
+    Err(FerrotorchError::InvalidArgument {
+        message: "linalg op requires f32 or f64".into(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2320,8 +2468,6 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
             message: format!("lu_factor requires a 2-D tensor, got {shape:?}"),
         });
     }
-    let (m, n) = (shape[0], shape[1]);
-    let k = m.min(n);
 
     // Autograd path: delegate to the differentiable wrapper. The forward value
     // still follows the resident CUDA or CPU path under `no_grad`.
@@ -2329,46 +2475,11 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
         return crate::grad_fns::linalg::lu_factor_differentiable(a);
     }
 
-    if k == 0 {
-        let lu = full_like_on_device(
-            shape,
-            <T as num_traits::Zero>::zero(),
-            a.device(),
-            "lu_factor",
-        )?;
-        return Ok((lu, Vec::new()));
-    }
-
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let (lu_h, ipiv) = if is_f32::<T>() {
-            backend.lu_factor_f32(a.gpu_handle()?, m, n)?
-        } else {
-            backend.lu_factor_f64(a.gpu_handle()?, m, n)?
-        };
-        // The LU matrix stays on device; pivots are returned as a host
-        // Vec<i32> directly from the trait (O(min(m,n)) ints, not worth a
-        // typed GPU int handle).
-        let lu = Tensor::from_storage(TensorStorage::gpu(lu_h), vec![m, n], false)?;
-        return Ok((lu, ipiv));
-    }
-    if a.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "lu_factor" });
-    }
-
-    if !(is_f32::<T>() || is_f64::<T>()) {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "lu_factor requires f32 or f64".into(),
-        });
-    }
-
-    let factor = cpu_lu_factor_packed(a.data_vec()?, m, n, "lu_factor")?;
+    let factor = lu_factor_with_info(a, "lu_factor")?;
     if factor.info > 0 {
         return Err(lu_zero_pivot_error("lu_factor", factor.info));
     }
-    let lu = Tensor::from_storage(TensorStorage::cpu(factor.packed), vec![m, n], false)?;
-    Ok((lu, factor.pivots))
+    Ok((factor.lu, factor.pivots))
 }
 
 // ===========================================================================
@@ -3508,9 +3619,7 @@ pub(crate) fn vector_norm_composite<T: Float>(
 ///
 /// Returns `(sign, logabsdet)` as scalar tensors. For singular matrices,
 /// `sign` is `0` and `logabsdet` is `-inf`. Mirrors `torch.linalg.slogdet`.
-/// CPU-only today.
 pub fn slogdet<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
-    require_cpu(a, "slogdet")?;
     let shape = a.shape();
     if shape.len() != 2 || shape[0] != shape[1] {
         return Err(FerrotorchError::InvalidArgument {
@@ -3525,41 +3634,16 @@ pub fn slogdet<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
         return crate::grad_fns::linalg::slogdet_differentiable(a);
     }
 
-    if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(a)?;
-        let (sign, logabs) = ferray_linalg::slogdet(&arr).map_err(FerrotorchError::Ferray)?;
-        Ok((
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(sign).unwrap()]),
-                vec![],
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(logabs).unwrap()]),
-                vec![],
-                false,
-            )?,
-        ))
-    } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(a)?;
-        let (sign, logabs) = ferray_linalg::slogdet(&arr).map_err(FerrotorchError::Ferray)?;
-        Ok((
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(sign).unwrap()]),
-                vec![],
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(logabs).unwrap()]),
-                vec![],
-                false,
-            )?,
-        ))
-    } else {
-        Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
-        })
+    if is_f32::<T>() || is_f64::<T>() {
+        return slogdet_from_lu_factor(a);
     }
+    if a.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "slogdet" });
+    }
+
+    Err(FerrotorchError::InvalidArgument {
+        message: "linalg op requires f32 or f64".into(),
+    })
 }
 
 /// Numerical rank of `a`.
