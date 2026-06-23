@@ -699,7 +699,7 @@
     { "path": "ferrotorch_core::grad_fns::linalg::CholeskyBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct CholeskyBackward< T : Float >" },
     { "path": "ferrotorch_core::grad_fns::linalg::CrossBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct CrossBackward< T : Float >" },
     { "path": "ferrotorch_core::grad_fns::linalg::DiagBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct DiagBackward< T : Float >" },
-    { "path": "ferrotorch_core::grad_fns::linalg::DiagonalBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct DiagonalBackward< T : Float >" },
+    { "path": "ferrotorch_core::grad_fns::linalg::DiagonalBackward", "kind": "struct", "signature": "pub struct DiagonalBackward< T : Float >" },
     { "path": "ferrotorch_core::grad_fns::linalg::DotBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct DotBackward< T : Float >" },
     { "path": "ferrotorch_core::grad_fns::linalg::DotBackward <T>::new", "kind": "method", "signature": "fn new (a : Tensor < T > , b : Tensor < T >) -> Self" },
     { "path": "ferrotorch_core::grad_fns::linalg::EigvalsBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct EigvalsBackward< T : Float >" },

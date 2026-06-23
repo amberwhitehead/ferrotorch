@@ -1754,12 +1754,6 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was 
 tracking_issue = "#1916"
 
 [[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::DiagonalBackward"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::EigvalsBackward"
 kind = "permanent"
 reason = "Autograd grad_fn / forward-helper internal for the linalg family (eig/eigvals complex VJP, #1345); the VJP is verified vs LIVE torch float64 by grad_fns::linalg::tests::eigvals_backward_* and the public crate::linalg::eigvals forward is conformance-covered by cpu_eig_and_eigvals. (Historical phase issue: #766, closed.)"
@@ -1856,12 +1850,6 @@ tracking_issue = "#1916"
 
 [[exclusion]]
 path = "ferrotorch_core::grad_fns::linalg::diag_differentiable"
-kind = "deferred"
-reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
-tracking_issue = "#1916"
-
-[[exclusion]]
-path = "ferrotorch_core::grad_fns::linalg::diagonal_differentiable"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1916 (was Phase 2.4-linalg #766, closed). Autograd grad_fn / forward-helper internal for the linalg family."
 tracking_issue = "#1916"

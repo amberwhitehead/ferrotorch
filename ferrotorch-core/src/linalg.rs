@@ -4205,61 +4205,151 @@ pub fn multi_dot<T: Float>(matrices: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T
     }
 }
 
-/// Diagonal of a 2-D tensor, optionally offset.
+/// Diagonal over the last two dimensions, optionally offset.
 ///
-/// Returns a 1-D tensor of length `min(m, n) - |offset|` containing
-/// `a[i, i + offset]`. Implemented in-house (no ferray dep) since it's a
-/// pure-shape operation.
+/// For an input shaped `[..., rows, cols]`, returns a view shaped
+/// `[..., diag_len]` containing `a[..., i, i + offset]` for non-negative
+/// offsets or `a[..., i - offset, i]` for negative offsets.
 ///
-/// Mirrors `torch.linalg.diagonal` (and `torch.diagonal` with `dim1=0,
-/// dim2=1`).
+/// Mirrors `torch.linalg.diagonal`, which is `torch.diagonal` with
+/// `dim1=-2, dim2=-1`. The result is a zero-copy stride view on CPU and CUDA.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `a`, this routes
+/// Autograd-aware: when grad tracking is active for `a`, this routes
 /// through `crate::grad_fns::linalg::diagonal_differentiable` (the VJP
 /// scatters `grad` back onto the `offset`-th diagonal of a zero matrix, per
 /// `diagonal_backward_symint`, upstream `tools/autograd/derivatives.yaml:573`).
 pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor<T>> {
-    let shape = a.shape();
-    if shape.len() != 2 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("diagonal requires a 2-D tensor, got {shape:?}"),
-        });
-    }
-
     // Autograd path: delegate to the differentiable wrapper, which computes
-    // the forward inside `no_grad` (preventing re-entry here) and attaches
-    // `DiagonalBackward`.
+    // the same view metadata and attaches `DiagonalBackward`.
     if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::diagonal_differentiable(a, offset);
     }
 
-    if a.is_cuda() {
-        return crate::ops::tensor_ops::diag(a, offset);
+    let meta = diagonal_view_metadata(a, offset)?;
+    a.try_stride_view(meta.shape, meta.stride, meta.storage_offset)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiagonalViewMetadata {
+    pub(crate) shape: Vec<usize>,
+    pub(crate) stride: Vec<isize>,
+    pub(crate) storage_offset: usize,
+}
+
+pub(crate) fn diagonal_view_metadata<T: Float>(
+    a: &Tensor<T>,
+    offset: i64,
+) -> FerrotorchResult<DiagonalViewMetadata> {
+    let shape = a.shape();
+    if shape.len() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "linalg.diagonal: input tensor must have at least 2 dimensions, got {shape:?}"
+            ),
+        });
     }
 
+    let ndim = shape.len();
+    let rows = shape[ndim - 2];
+    let cols = shape[ndim - 1];
+    let (row_start, col_start, diag_len) = diagonal_start_len(rows, cols, offset)?;
+
+    let in_stride = a.strides();
+    let row_stride = in_stride[ndim - 2];
+    let col_stride = in_stride[ndim - 1];
+    let diag_stride =
+        row_stride
+            .checked_add(col_stride)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "linalg.diagonal: diagonal stride overflows isize".into(),
+            })?;
+
+    let mut out_shape = shape[..ndim - 2].to_vec();
+    out_shape.push(diag_len);
+    let mut out_stride = in_stride[..ndim - 2].to_vec();
+    out_stride.push(diag_stride);
+
+    let storage_offset = if diag_len == 0 {
+        a.storage_offset()
+    } else {
+        shifted_diagonal_storage_offset(
+            a.storage_offset(),
+            row_start,
+            row_stride,
+            col_start,
+            col_stride,
+        )?
+    };
+
+    Ok(DiagonalViewMetadata {
+        shape: out_shape,
+        stride: out_stride,
+        storage_offset,
+    })
+}
+
+fn diagonal_start_len(
+    rows: usize,
+    cols: usize,
+    offset: i64,
+) -> FerrotorchResult<(usize, usize, usize)> {
     let (row_start, col_start) = if offset >= 0 {
-        (0usize, offset as usize)
+        let col_start = usize::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("linalg.diagonal: offset {offset} overflows usize"),
+        })?;
+        (0usize, col_start)
     } else {
         let row_start = usize::try_from(offset.unsigned_abs()).map_err(|_| {
             FerrotorchError::InvalidArgument {
-                message: format!("diagonal: offset {offset} overflows usize"),
+                message: format!("linalg.diagonal: offset {offset} overflows usize"),
             }
         })?;
         (row_start, 0usize)
     };
-    if col_start >= shape[1] || row_start >= shape[0] {
-        return Tensor::from_storage(TensorStorage::cpu(Vec::<T>::new()), vec![0], false);
+
+    if row_start >= rows || col_start >= cols {
+        return Ok((row_start, col_start, 0));
     }
-    let len = (shape[0] - row_start).min(shape[1] - col_start);
-    let data = a.data_vec()?;
-    let mut out: Vec<T> = Vec::with_capacity(len);
-    for i in 0..len {
-        let r = row_start + i;
-        let c = col_start + i;
-        out.push(data[r * shape[1] + c]);
+    Ok((
+        row_start,
+        col_start,
+        (rows - row_start).min(cols - col_start),
+    ))
+}
+
+fn shifted_diagonal_storage_offset(
+    base: usize,
+    row_start: usize,
+    row_stride: isize,
+    col_start: usize,
+    col_stride: isize,
+) -> FerrotorchResult<usize> {
+    let base = i128::try_from(base).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("linalg.diagonal: storage offset {base} overflows i128"),
+    })?;
+    let row_delta = (row_start as i128)
+        .checked_mul(row_stride as i128)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "linalg.diagonal: row offset overflows signed range".into(),
+        })?;
+    let col_delta = (col_start as i128)
+        .checked_mul(col_stride as i128)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "linalg.diagonal: column offset overflows signed range".into(),
+        })?;
+    let shifted = base
+        .checked_add(row_delta)
+        .and_then(|v| v.checked_add(col_delta))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "linalg.diagonal: storage offset overflows signed range".into(),
+        })?;
+    if shifted < 0 || shifted > usize::MAX as i128 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("linalg.diagonal: storage offset {shifted} out of range"),
+        });
     }
-    Tensor::from_storage(TensorStorage::cpu(out), vec![len], false)
+    Ok(shifted as usize)
 }
 
 // ---------------------------------------------------------------------------

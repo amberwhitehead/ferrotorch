@@ -36,7 +36,7 @@
 //! | REQ-27 (`linalg.lu`) | SHIPPED | `LuBackwardL`/`LuBackwardU` + `lu_differentiable` (PyTorch square/wide/tall block formulas per `FunctionsManual.cpp:6854`); FD-verified for CPU wide and CUDA-resident against CPU in `tests/audit_core146_linalg_autograd.rs`; non-test consumer: grad-aware `crate::linalg::lu` delegates here when grad is enabled. |
 //! | REQ-28 (`linalg.lu_factor`) | SHIPPED | `LuFactorBackward` + `lu_factor_differentiable` splits packed `LU` with `grad.narrow(-1,0,k)` / `grad.narrow(-2,0,k)` per `FunctionsManual.cpp:6960`; FD-verified for CPU tall and CUDA-resident against CPU in `tests/audit_core146_linalg_autograd.rs`; non-test consumer: grad-aware `crate::linalg::lu_factor` delegates here when grad is enabled. |
 //! | REQ-29 (`trace`) | SHIPPED | `TraceBackward` + `trace_differentiable` (VJP `dA = grad * I` per `derivatives.yaml:1785`), forward `crate::linalg::trace`; FD-verified `tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"trace"` arm (parity 8/8, 0 failed). Blocker #1345. |
-//! | REQ-30 (`diagonal`) | SHIPPED | `DiagonalBackward` + `diagonal_differentiable` (VJP scatters grad onto the offset-th diagonal per `derivatives.yaml:573` `diagonal_backward_symint`); FD-verified `grad_fns::linalg::tests::diagonal_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::linalg::diagonal` forward delegates here. Closes #1583. |
+//! | REQ-30 (`diagonal`) | SHIPPED | `DiagonalBackward` + `diagonal_differentiable` produce PyTorch's last-two-dims diagonal view for batched CPU/CUDA tensors and wrap the generic strided-view VJP to scatter gradients back per `derivatives.yaml:573` `diagonal_backward_symint`; verified by `audit_core2028_linalg_diagonal_parity` and legacy FD tests. |
 //! | REQ-31 (`diag`) | SHIPPED | `DiagBackward` + `diag_differentiable` (adjoint of the 0/1 selection: gather for 1-D, scatter for 2-D); FD-verified `grad_fns::linalg::tests::diag_extract_public_forward_is_grad_aware_and_matches_fd` + `diag_construct_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::diag` forward delegates here. Closes #1583. |
 //! | REQ-32 (`tril`) | SHIPPED | `TriangularBackward` + `tril_differentiable` (VJP masks grad by the kept lower triangle per `derivatives.yaml:1805` `grad.tril_symint`); FD-verified `grad_fns::linalg::tests::tril_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::tril` forward delegates here. Closes #1583. |
 //! | REQ-33 (`triu`) | SHIPPED | `triu_differentiable` (sharing `TriangularBackward`; VJP masks grad by the kept upper triangle per `derivatives.yaml:1809` `grad.triu_symint`); FD-verified `grad_fns::linalg::tests::triu_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::triu` forward delegates here. Closes #1583. |
@@ -6503,7 +6503,7 @@ pub fn kron_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorch
 }
 
 // ---------------------------------------------------------------------------
-// DiagonalBackward — d = diagonal(A, offset)  (2D -> 1D)
+// DiagonalBackward — d = diagonal(A, offset) over the last two dims
 // ---------------------------------------------------------------------------
 
 fn diag_scatter_to_shape<T: Float>(
@@ -6573,48 +6573,33 @@ fn diag_scatter_to_shape<T: Float>(
     from_cpu(out, vec![rows, cols])
 }
 
-/// Backward for `diagonal(A, offset)`.
+/// Backward for `diagonal(A, offset)` over the last two dimensions.
 ///
 /// VJP (`tools/autograd/derivatives.yaml:572` `diagonal` →
-/// `diagonal_backward_symint`): scatter `grad` (a 1-D vector) back onto the
-/// `offset`-th diagonal of a zero matrix shaped like `A`.
-#[derive(Debug)]
+/// `diagonal_backward_symint`): scatter `grad` back onto the `offset`-th
+/// diagonal of a zero tensor shaped like `A`. This wraps the same
+/// `AsStridedBackward` machinery used by PyTorch's view-style diagonal:
+/// batched dimensions, non-contiguous inputs, and CUDA scatter-add are handled
+/// by the generic strided-view VJP instead of a duplicate diagonal kernel.
 pub struct DiagonalBackward<T: Float> {
-    rows: usize,
-    cols: usize,
-    offset: i64,
-    _marker: std::marker::PhantomData<T>,
+    inner: crate::stride_tricks::AsStridedBackward<T>,
+}
+
+impl<T: Float> std::fmt::Debug for DiagonalBackward<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiagonalBackward").finish_non_exhaustive()
+    }
 }
 
 impl<T: Float> GradFn<T> for DiagonalBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let grad_input = diag_scatter_to_shape(grad_output, self.rows, self.cols, self.offset)?;
-        Ok(vec![Some(grad_input)])
-    }
-
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![]
-    }
-
-    fn name(&self) -> &'static str {
-        "DiagonalBackward"
-    }
-}
-
-/// Carries the input edge for `diagonal`.
-#[derive(Debug)]
-struct DiagonalForward<T: Float> {
-    input: Tensor<T>,
-    inner: DiagonalBackward<T>,
-}
-
-impl<T: Float> GradFn<T> for DiagonalForward<T> {
-    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         self.inner.backward(grad_output)
     }
+
     fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.input]
+        self.inner.inputs()
     }
+
     fn name(&self) -> &'static str {
         "DiagonalBackward"
     }
@@ -6626,24 +6611,18 @@ pub fn diagonal_differentiable<T: Float>(
     a: &Tensor<T>,
     offset: i64,
 ) -> FerrotorchResult<Tensor<T>> {
-    // Forward computed under `no_grad`: `linalg_fwd::diagonal` delegates back
-    // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
-    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::diagonal(a, offset))?;
+    let meta = linalg_fwd::diagonal_view_metadata(a, offset)?;
     if is_grad_enabled() && a.requires_grad() {
-        let shape = a.shape();
-        let grad_fn = Arc::new(DiagonalForward {
-            input: a.clone(),
-            inner: DiagonalBackward {
-                rows: shape[0],
-                cols: shape[1],
-                offset,
-                _marker: std::marker::PhantomData,
-            },
-        });
-        let (storage, sh) = result.into_storage_and_shape()?;
-        Tensor::from_operation(storage, sh, grad_fn)
+        let inner = crate::stride_tricks::AsStridedBackward::new(
+            a.clone(),
+            meta.shape.clone(),
+            meta.stride.clone(),
+            meta.storage_offset,
+        );
+        let grad_fn = Arc::new(DiagonalBackward { inner });
+        a.try_stride_view_operation(meta.shape, meta.stride, meta.storage_offset, grad_fn)
     } else {
-        Ok(result)
+        a.try_stride_view(meta.shape, meta.stride, meta.storage_offset)
     }
 }
 
