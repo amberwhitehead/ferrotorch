@@ -6,7 +6,9 @@
 //! - `/home/doll/pytorch/tools/autograd/derivatives.yaml`
 //!   `linalg_vector_norm`
 
-use ferrotorch_core::linalg::{cond, matrix_rank, vector_norm};
+use ferrotorch_core::linalg::{
+    MatrixNormOrder, cond, matrix_norm, matrix_norm_ord, matrix_rank, vector_norm,
+};
 use ferrotorch_core::{Device, Tensor, TensorStorage};
 use half::{bf16, f16};
 
@@ -55,6 +57,203 @@ fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
             (a - e).abs()
         );
     }
+}
+
+fn assert_close_f64(actual: &[f64], expected: &[f64], tol: f64, label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+    for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (a - e).abs() <= tol,
+            "{label}[{i}] actual={a} expected={e} diff={}",
+            (a - e).abs()
+        );
+    }
+}
+
+#[test]
+fn matrix_norm_ord_cpu_matches_torch_order_set() {
+    // Live torch 2.11 oracle for:
+    // A = torch.tensor([[1., -2., 3.], [4., -5., 6.]], dtype=torch.float64)
+    let a = tensor_f64(&[1.0, -2.0, 3.0, 4.0, -5.0, 6.0], &[2, 3], false);
+    let cases = [
+        (MatrixNormOrder::Fro, 9.539_392_014_169_456),
+        (MatrixNormOrder::Nuclear, 10.280_901_636_369_208),
+        (MatrixNormOrder::One, 9.0),
+        (MatrixNormOrder::NegOne, 5.0),
+        (MatrixNormOrder::Two, 9.508_032_000_695_724),
+        (MatrixNormOrder::NegTwo, 0.772_869_635_673_484_5),
+        (MatrixNormOrder::Inf, 15.0),
+        (MatrixNormOrder::NegInf, 6.0),
+    ];
+    for (ord, expected) in cases {
+        let got = matrix_norm_ord(&a, ord).unwrap();
+        assert_eq!(got.shape(), &[], "ord={ord:?} shape");
+        assert_close_f64(
+            got.data().unwrap(),
+            &[expected],
+            1e-10,
+            &format!("ord={ord:?}"),
+        );
+    }
+
+    assert_close_f64(
+        matrix_norm(&a).unwrap().data().unwrap(),
+        &[9.539_392_014_169_456],
+        1e-10,
+        "default fro",
+    );
+}
+
+#[test]
+fn matrix_norm_ord_cpu_empty_edges_match_torch() {
+    let zero_by_three = tensor_f64(&[], &[0, 3], false);
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::Fro)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::Nuclear)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::One)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::NegOne)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::Two)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::NegTwo)
+            .unwrap_err()
+            .to_string()
+            .contains("non-zero size")
+    );
+    assert_eq!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::Inf)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert!(
+        matrix_norm_ord(&zero_by_three, MatrixNormOrder::NegInf)
+            .unwrap_err()
+            .to_string()
+            .contains("non-zero size")
+    );
+
+    let three_by_zero = tensor_f64(&[], &[3, 0], false);
+    assert_eq!(
+        matrix_norm_ord(&three_by_zero, MatrixNormOrder::One)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert!(
+        matrix_norm_ord(&three_by_zero, MatrixNormOrder::NegOne)
+            .unwrap_err()
+            .to_string()
+            .contains("non-zero size")
+    );
+    assert_eq!(
+        matrix_norm_ord(&three_by_zero, MatrixNormOrder::Inf)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+    assert_eq!(
+        matrix_norm_ord(&three_by_zero, MatrixNormOrder::NegInf)
+            .unwrap()
+            .data()
+            .unwrap(),
+        &[0.0]
+    );
+}
+
+#[test]
+fn matrix_norm_ord_low_precision_accepts_only_torch_supported_orders() {
+    let x16 = tensor_f16(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    assert_eq!(
+        matrix_norm_ord(&x16, MatrixNormOrder::One)
+            .unwrap()
+            .data()
+            .unwrap()[0]
+            .to_f32(),
+        6.0
+    );
+    assert_eq!(
+        matrix_norm_ord(&x16, MatrixNormOrder::Inf)
+            .unwrap()
+            .data()
+            .unwrap()[0]
+            .to_f32(),
+        7.0
+    );
+    assert!(
+        matrix_norm_ord(&x16, MatrixNormOrder::Two)
+            .unwrap_err()
+            .to_string()
+            .contains("Low precision dtypes not supported")
+    );
+    assert!(
+        matrix_norm_ord(&x16, MatrixNormOrder::Nuclear)
+            .unwrap_err()
+            .to_string()
+            .contains("Low precision dtypes not supported")
+    );
+
+    let xb = tensor_bf16(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    assert_eq!(
+        matrix_norm_ord(&xb, MatrixNormOrder::One)
+            .unwrap()
+            .data()
+            .unwrap()[0]
+            .to_f32(),
+        6.0
+    );
+    assert!(
+        matrix_norm_ord(&xb, MatrixNormOrder::NegTwo)
+            .unwrap_err()
+            .to_string()
+            .contains("Low precision dtypes not supported")
+    );
+}
+
+#[test]
+fn matrix_norm_ord_one_backward_uses_reduction_subgradient() {
+    let a = tensor_f64(&[1.0, -2.0, 3.0, 4.0, -5.0, 6.0], &[2, 3], true);
+    let n = matrix_norm_ord(&a, MatrixNormOrder::One).unwrap();
+    assert_eq!(n.data().unwrap(), &[9.0]);
+    n.backward().unwrap();
+    let grad = a.grad().unwrap().unwrap();
+    assert_close_f64(
+        grad.data().unwrap(),
+        &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        0.0,
+        "ord=1 backward",
+    );
 }
 
 #[test]
@@ -311,6 +510,32 @@ mod gpu {
         let n = vector_norm(&x, f64::NAN).unwrap();
         assert_eq!(n.device(), Device::Cuda(0));
         assert_eq!(n.data_vec().unwrap(), &[0.0]);
+    }
+
+    #[test]
+    fn matrix_norm_ord_cuda_matches_torch_and_stays_resident() {
+        // Live torch 2.11 f32 oracle for [[1,2],[3,4]].
+        let a = cuda_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+        let cases = [
+            (MatrixNormOrder::Fro, 5.477_226),
+            (MatrixNormOrder::Nuclear, 5.830_951_7),
+            (MatrixNormOrder::One, 6.0),
+            (MatrixNormOrder::NegOne, 4.0),
+            (MatrixNormOrder::Two, 5.464_986),
+            (MatrixNormOrder::NegTwo, 0.365_966),
+            (MatrixNormOrder::Inf, 7.0),
+            (MatrixNormOrder::NegInf, 3.0),
+        ];
+        for (ord, expected) in cases {
+            let got = matrix_norm_ord(&a, ord).unwrap();
+            assert_eq!(got.device(), Device::Cuda(0), "ord={ord:?} device");
+            assert_close_f32(
+                &got.data_vec().unwrap(),
+                &[expected],
+                2e-5,
+                &format!("cuda ord={ord:?}"),
+            );
+        }
     }
 
     #[test]

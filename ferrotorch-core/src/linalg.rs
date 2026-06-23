@@ -1681,16 +1681,65 @@ pub fn cholesky<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 // ---------------------------------------------------------------------------
-// Matrix norm (Frobenius)
+// Matrix norm
 // ---------------------------------------------------------------------------
 
-/// Matrix norm (Frobenius by default).
+/// Supported `torch.linalg.matrix_norm` order selectors for ferrotorch's
+/// scalar 2-D matrix surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatrixNormOrder {
+    /// Frobenius norm (`ord="fro"`), PyTorch's default.
+    Fro,
+    /// Nuclear norm (`ord="nuc"`), sum of singular values.
+    Nuclear,
+    /// Maximum absolute column sum (`ord=1`).
+    One,
+    /// Minimum absolute column sum (`ord=-1`).
+    NegOne,
+    /// Largest singular value (`ord=2`).
+    Two,
+    /// Smallest singular value (`ord=-2`).
+    NegTwo,
+    /// Maximum absolute row sum (`ord=inf`).
+    Inf,
+    /// Minimum absolute row sum (`ord=-inf`).
+    NegInf,
+}
+
+impl MatrixNormOrder {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Fro => "fro",
+            Self::Nuclear => "nuc",
+            Self::One => "1",
+            Self::NegOne => "-1",
+            Self::Two => "2",
+            Self::NegTwo => "-2",
+            Self::Inf => "inf",
+            Self::NegInf => "-inf",
+        }
+    }
+}
+
+/// Matrix norm with PyTorch's default `ord="fro"`.
 ///
-/// Returns a scalar tensor containing the Frobenius norm.
-///
-/// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Returns a scalar tensor for this crate's 2-D matrix surface. Use
+/// [`matrix_norm_ord`] for PyTorch's other matrix norm orders.
 pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    matrix_norm_ord(input, MatrixNormOrder::Fro)
+}
+
+/// Matrix norm for the supported PyTorch order set on a 2-D matrix.
+///
+/// This mirrors `torch.linalg.matrix_norm(A, ord=..., dim=(-2,-1),
+/// keepdim=false)` for real tensors:
+/// `fro`, `nuc`, `±1`, `±2`, and `±inf`. Frobenius, `±1`, and `±inf` support
+/// f16/bf16 like PyTorch; nuclear and `±2` require f32/f64 because they route
+/// through SVD. CUDA f32/f64 paths compose resident tensor/SVD kernels.
+pub fn matrix_norm_ord<T: Float>(
+    input: &Tensor<T>,
+    ord: MatrixNormOrder,
+) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -1698,58 +1747,81 @@ pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
 
-    // Autograd path: CPU keeps the existing closed-form wrapper. CUDA composes
-    // resident primitives (`sqrt(sum(x*x))`) so backward flows through the
-    // existing Mul/Sum/Sqrt CUDA nodes instead of saving a host scalar.
-    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
-        if input.is_cuda() {
-            let squared = input.mul_t(input)?;
-            return squared.sum_all()?.sqrt_t();
+    match ord {
+        MatrixNormOrder::Fro => vector_norm(input, 2.0),
+        MatrixNormOrder::Nuclear | MatrixNormOrder::Two | MatrixNormOrder::NegTwo => {
+            matrix_norm_svd_order(input, ord)
         }
-        return crate::grad_fns::linalg::matrix_norm_differentiable(input);
+        MatrixNormOrder::One => matrix_norm_abs_sum_extreme(input, 0, true),
+        MatrixNormOrder::NegOne => matrix_norm_abs_sum_extreme(input, 0, false),
+        MatrixNormOrder::Inf => matrix_norm_abs_sum_extreme(input, 1, true),
+        MatrixNormOrder::NegInf => matrix_norm_abs_sum_extreme(input, 1, false),
     }
+}
 
-    if input.is_cuda() {
-        // Frobenius norm: sqrt(sum_ij A_ij^2). Composes existing GPU
-        // primitives (mul → reduce_sum → sqrt) — three kernel launches but
-        // fully GPU-resident; result lands as a 0-d tensor on device.
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let buf = input.gpu_handle()?;
-        let numel = crate::shape::numel(shape);
-        let h = if is_f32::<T>() {
-            let sq = backend.mul_f32(buf, buf)?;
-            let s = backend.sum_f32(&sq, numel)?;
-            backend.sqrt_f32(&s)?
-        } else if is_f64::<T>() {
-            let sq = backend.mul_f64(buf, buf)?;
-            let s = backend.sum_f64(&sq, numel)?;
-            backend.sqrt_f64(&s)?
-        } else {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "matrix_norm requires f32 or f64".into(),
-            });
-        };
-        return Tensor::from_storage(TensorStorage::gpu(h), vec![], false);
-    }
-
-    if is_f32::<T>() {
-        let arr = tensor_to_arraydyn_f32(input)?;
-        let n: f32 = ferray_linalg::norm(&arr, ferray_linalg::NormOrder::Fro)
-            .map_err(FerrotorchError::Ferray)?;
-        let val = T::from(n).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
-    } else if is_f64::<T>() {
-        let arr = tensor_to_arraydyn_f64(input)?;
-        let n: f64 = ferray_linalg::norm(&arr, ferray_linalg::NormOrder::Fro)
-            .map_err(FerrotorchError::Ferray)?;
-        let val = T::from(n).unwrap();
-        Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)
+fn require_matrix_norm_svd_dtype<T: Float>(ord: MatrixNormOrder) -> FerrotorchResult<()> {
+    if is_f32::<T>() || is_f64::<T>() {
+        Ok(())
     } else {
         Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
+            message: format!(
+                "linalg.matrix_norm: Low precision dtypes not supported for ord={}",
+                ord.name()
+            ),
         })
     }
+}
+
+fn matrix_norm_svd_order<T: Float>(
+    input: &Tensor<T>,
+    ord: MatrixNormOrder,
+) -> FerrotorchResult<Tensor<T>> {
+    require_matrix_norm_svd_dtype::<T>(ord)?;
+    let singular_count = input.shape()[0].min(input.shape()[1]);
+    if singular_count == 0 {
+        return match ord {
+            MatrixNormOrder::Nuclear => input.mul_t(input)?.sum_all(),
+            MatrixNormOrder::Two => scalar_on_device(
+                <T as num_traits::Zero>::zero(),
+                input.device(),
+                "linalg.matrix_norm",
+            ),
+            MatrixNormOrder::NegTwo => Err(FerrotorchError::InvalidArgument {
+                message: "amin(): Expected reduction dim -1 to have non-zero size".into(),
+            }),
+            _ => unreachable!("matrix_norm_svd_order only handles nuc/±2"),
+        };
+    }
+
+    let singular_values = svdvals(input)?;
+    match ord {
+        MatrixNormOrder::Nuclear => singular_values.sum_all(),
+        MatrixNormOrder::Two => singular_values.amax(),
+        MatrixNormOrder::NegTwo => singular_values.amin(),
+        _ => unreachable!("matrix_norm_svd_order only handles nuc/±2"),
+    }
+}
+
+fn matrix_norm_abs_sum_extreme<T: Float>(
+    input: &Tensor<T>,
+    sum_dim: i64,
+    find_max: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let sums = input.abs_t()?.sum_dim(sum_dim, false)?;
+    if sums.numel() == 0 {
+        if find_max {
+            return scalar_on_device(
+                <T as num_traits::Zero>::zero(),
+                input.device(),
+                "linalg.matrix_norm",
+            );
+        }
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amin(): Expected reduction dim 0 to have non-zero size".into(),
+        });
+    }
+
+    if find_max { sums.amax() } else { sums.amin() }
 }
 
 // ---------------------------------------------------------------------------
