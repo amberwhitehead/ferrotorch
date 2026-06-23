@@ -4,6 +4,7 @@
 //! to `infer_size(input.sizes(), other.sizes())`; derivatives.yaml routes
 //! `da = linalg_cross(other, grad)` and `db = linalg_cross(grad, self)`.
 
+use ferrotorch_core::grad_fns::linalg::{CrossBackward, cross_differentiable};
 use ferrotorch_core::linalg::cross;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
@@ -70,6 +71,17 @@ fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
     }
 }
 
+fn short_type_name<T>() -> String {
+    std::any::type_name::<T>()
+        .rsplit("::")
+        .next()
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 fn cross_broadcasts_same_rank_batch_dims_like_torch() {
     let a = tensor(&[1.0, 0.0, 0.0], &[1, 3], false);
@@ -82,6 +94,38 @@ fn cross_broadcasts_same_rank_batch_dims_like_torch() {
         &c.data_vec().unwrap(),
         &[0.0, 0.0, 1.0, 0.0, -1.0, 0.0],
         "cross broadcast forward",
+    );
+}
+
+#[test]
+fn cross_differentiable_uses_pytorch_bilinear_vjp_with_broadcast_reduction() {
+    let a = tensor(&[1.0, 2.0, 3.0], &[1, 3], true);
+    let b = tensor(&[-1.0, 0.5, 2.0, 4.0, -2.0, 1.0], &[2, 3], true);
+    let grad = tensor(&[0.25, -1.0, 2.0, -0.5, 1.5, -2.5], &[2, 3], false);
+
+    let c = cross_differentiable(&a, &b, -1).expect("differentiable broadcasted cross");
+    let node = c
+        .grad_fn()
+        .expect("cross_differentiable must attach a grad_fn");
+    assert_eq!(node.name(), short_type_name::<CrossBackward<f64>>());
+    assert_eq!(c.shape(), &[2, 3]);
+    assert_close(
+        &c.data_vec().unwrap(),
+        &[2.5, -5.0, 2.5, 8.0, 11.0, -10.0],
+        "cross_differentiable forward",
+    );
+
+    c.backward_with_gradient(&grad).expect("cross backward");
+
+    let ga = a.grad().unwrap().expect("a.grad").data_vec().unwrap();
+    let gb = b.grad().unwrap().expect("b.grad").data_vec().unwrap();
+    assert_eq!(a.grad().unwrap().unwrap().shape(), &[1, 3]);
+    assert_eq!(b.grad().unwrap().unwrap().shape(), &[2, 3]);
+    assert_close(&ga, &[6.5, 12.0, 5.875], "weighted broadcast grad a");
+    assert_close(
+        &gb,
+        &[-7.0, 1.25, 1.5, 9.5, -1.0, -2.5],
+        "weighted broadcast grad b",
     );
 }
 
@@ -329,6 +373,39 @@ mod gpu {
             &got,
             &[-14.0, -14.0, 28.0, 28.0, -14.0, -14.0],
             "cuda f32 dim0",
+        );
+    }
+
+    #[test]
+    fn cuda_cross_packs_strided_broadcast_input_before_kernel() {
+        ensure_cuda();
+        let base = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 4.0, 2.0, 5.0, 3.0, 6.0]),
+            vec![3, 2],
+            false,
+        )
+        .unwrap()
+        .to(Device::Cuda(0))
+        .expect("upload base");
+        let a = base.transpose(0, 1).expect("strided cuda transpose");
+        let b = Tensor::from_storage(
+            TensorStorage::cpu(vec![0.0_f32, 1.0, 0.0]),
+            vec![1, 3],
+            false,
+        )
+        .unwrap()
+        .to(Device::Cuda(0))
+        .expect("upload broadcast rhs");
+
+        let c = cross(&a, &b, -1).expect("cuda strided broadcast cross");
+
+        assert_eq!(c.device(), Device::Cuda(0));
+        assert_eq!(c.shape(), &[2, 3]);
+        let got: Vec<f64> = c.data_vec().unwrap().into_iter().map(f64::from).collect();
+        assert_close(
+            &got,
+            &[-3.0, 0.0, 1.0, -6.0, 0.0, 4.0],
+            "cuda strided broadcast cross",
         );
     }
 

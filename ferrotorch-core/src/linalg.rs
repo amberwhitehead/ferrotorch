@@ -3990,14 +3990,15 @@ fn float_to_norm_order<T: Into<f64>>(ord: T) -> ferray_linalg::NormOrder {
 
 /// Vector cross product `a × b` along the given axis.
 ///
-/// The axis selected by `dim` must have size 3 for both inputs, and the two
-/// tensors must share the same shape. `dim` follows torch conventions:
-/// non-negative indices count from the front, negative indices count from
-/// the back (e.g. `-1` selects the last axis).
+/// The axis selected by `dim` must have size 3 for both inputs. Inputs must
+/// have the same rank, and every non-cross axis follows PyTorch broadcasting
+/// rules. `dim` follows torch conventions: non-negative indices count from the
+/// front, negative indices count from the back (e.g. `-1` selects the last
+/// axis).
 ///
 /// For a 1-D length-3 input pair this matches `numpy.cross` and
-/// `torch.linalg.cross(..., dim=-1)`; for N-D tensors with one length-3
-/// axis it produces the same shape with the cross product computed across
+/// `torch.linalg.cross(..., dim=-1)`; for N-D tensors with one length-3 axis
+/// it produces the broadcasted shape with the cross product computed across
 /// the 3 elements along `dim`, mirroring `torch.linalg.cross`.
 ///
 pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
