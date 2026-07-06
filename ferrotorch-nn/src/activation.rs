@@ -508,10 +508,12 @@ impl LeakyReLU {
         let scale = T::from(1.0 - self.negative_slope).unwrap();
         let slope = T::from(self.negative_slope).unwrap();
 
-        // scale_tensor = scalar(1 - negative_slope)
-        let scale_tensor = ferrotorch_core::scalar(scale)?;
-        // slope_tensor = scalar(negative_slope)
-        let slope_tensor = ferrotorch_core::scalar(slope)?;
+        // scale_tensor / slope_tensor: 0-d scalars placed on the input's device
+        // (ferrotorch_core::scalar builds a CPU tensor; multiplying it with a
+        // CUDA input otherwise raises DeviceMismatch). #749 GPU-cnn smoke.
+        let device = input.device();
+        let scale_tensor = ferrotorch_core::scalar(scale)?.to(device)?;
+        let slope_tensor = ferrotorch_core::scalar(slope)?.to(device)?;
 
         // result = scale * relu(x) + slope * x
         let scaled_relu = arithmetic::mul(&relu_x, &scale_tensor)?;

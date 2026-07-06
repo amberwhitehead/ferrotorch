@@ -3076,8 +3076,16 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-        let data = self.data()?;
-        Ok(data[0])
+        if self.device().is_cpu() {
+            let data = self.data()?;
+            Ok(data[0])
+        } else {
+            // GPU-resident scalar: copy the single element to the host first
+            // (`data()` / `try_as_slice` cannot read CUDA storage and would
+            // otherwise raise `GpuTensorNotAccessible`). #749 GPU-cnn smoke.
+            let host = self.to(Device::Cpu)?;
+            Ok(host.data()?[0])
+        }
     }
 
     /// Returns true if two tensors are the same object (same Arc).

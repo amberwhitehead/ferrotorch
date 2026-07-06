@@ -258,7 +258,8 @@ impl<T: Float> GradFn<T> for MaxPool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -665,7 +666,8 @@ impl<T: Float> GradFn<T> for AdaptiveAvgPool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -925,7 +927,8 @@ impl<T: Float> GradFn<T> for MaxPool1dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1104,7 +1107,8 @@ impl<T: Float> GradFn<T> for MaxPool3dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1272,7 +1276,8 @@ impl<T: Float> GradFn<T> for AvgPool1dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1496,7 +1501,8 @@ impl<T: Float> GradFn<T> for AvgPool3dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1654,7 +1660,8 @@ impl<T: Float> GradFn<T> for AdaptiveMaxPool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -1809,7 +1816,8 @@ impl<T: Float> GradFn<T> for AdaptiveAvgPool1dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2003,7 +2011,8 @@ impl<T: Float> GradFn<T> for AdaptiveAvgPool3dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2169,7 +2178,8 @@ impl<T: Float> GradFn<T> for MaxUnpool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2320,7 +2330,8 @@ impl<T: Float> GradFn<T> for AdaptiveMaxPool1dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2484,7 +2495,8 @@ impl<T: Float> GradFn<T> for AdaptiveMaxPool3dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2697,7 +2709,8 @@ impl<T: Float> GradFn<T> for FractionalMaxPool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -2898,7 +2911,8 @@ impl<T: Float> GradFn<T> for LPPool1dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -3119,7 +3133,8 @@ impl<T: Float> GradFn<T> for LPPool2dBackward<T> {
             TensorStorage::cpu(grad_input),
             self.input.shape().to_vec(),
             false,
-        )?;
+        )?
+        .to(self.input.device())?; // restore device (mirror forward; #749)
         Ok(vec![Some(grad_tensor)])
     }
 
