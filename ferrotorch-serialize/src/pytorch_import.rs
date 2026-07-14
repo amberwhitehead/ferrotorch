@@ -687,7 +687,21 @@ fn find_dict_entries(value: &PickleValue) -> FerrotorchResult<Vec<(PickleValue, 
                 }
                 find_dict_entries(obj)
             }
-            PickleValue::Dict(entries) => Ok(entries.clone()),
+            PickleValue::Dict(state_entries) => {
+                // The BUILD state on a torch OrderedDict is auxiliary attribute
+                // data (notably `_metadata`), NOT the dict contents — the real
+                // entries live in `obj` (the OrderedDict built via REDUCE +
+                // SETITEMS). Prefer `obj`; fall back to the state only if `obj`
+                // has no entries. Without this, real `torch.save` state dicts
+                // (which carry `_metadata`) report "no tensors found" because
+                // only the `_metadata` key is seen. (See FERRO.md.)
+                let obj_entries = find_dict_entries(obj)?;
+                if !obj_entries.is_empty() {
+                    Ok(obj_entries)
+                } else {
+                    Ok(state_entries.clone())
+                }
+            }
             PickleValue::Tuple(items) if items.len() == 1 => {
                 if let PickleValue::List(inner) = &items[0] {
                     let mut entries = Vec::new();
@@ -865,6 +879,16 @@ fn storage_type_to_dtype(name: &str) -> String {
     }
 }
 
+/// Whether a `PyTorch` dtype string names a floating-point type loadable into a
+/// `StateDict<T: Float>`. Used to skip non-float buffers (e.g. BatchNorm's
+/// `num_batches_tracked`, a `Long` scalar) instead of aborting the load.
+fn is_loadable_float_dtype(dtype_str: &str) -> bool {
+    matches!(
+        dtype_str,
+        "Float" | "Double" | "Half" | "BFloat16"
+    )
+}
+
 /// Number of bytes per element for a given `PyTorch` dtype string.
 // Several PyTorch dtypes share an element width (e.g. `Float` and `Int` are
 // both 4 bytes); merging them via `|` would obscure the spec mapping that
@@ -982,13 +1006,29 @@ fn load_pytorch_state_dict_inner<T: Float, R: Read + std::io::Seek>(
         });
     }
 
-    // Determine the archive prefix (e.g., "archive/data/" or just "data/").
-    let data_prefix = find_data_prefix(&mut archive, &tensor_infos);
+    // Determine the archive prefix. Modern `torch.save` writes the zip as
+    // `<filestem>/data.pkl` + `<filestem>/data/<n>`, so derive the prefix from
+    // the pickle's location and let `find_data_prefix` verify it against the
+    // archive contents (falling back to the legacy `archive/data/` layout).
+    let data_prefix = find_data_prefix(&mut archive, &tensor_infos, &pkl_name)?;
 
     // Load each tensor.
     let mut state: StateDict<T> = HashMap::with_capacity(tensor_infos.len());
 
     for info in &tensor_infos {
+        // `load_pytorch_state_dict::<T: Float>` produces a `StateDict<T>` that
+        // can only hold floating-point tensors. Real torch state dicts contain
+        // integer buffers — notably every `BatchNorm` layer's
+        // `num_batches_tracked` (a `Long`/int64 scalar), and sometimes
+        // `Bool`/`Int` masks. Rather than abort the whole load with a
+        // `DtypeMismatch`, skip non-float tensors so a BN-bearing model imports
+        // cleanly. `num_batches_tracked` is a momentum counter that is not
+        // needed to reproduce forward/eval behavior (the running mean/var are
+        // what matter, and those are float).
+        if !is_loadable_float_dtype(&info.dtype_str) {
+            continue;
+        }
+
         let data_path = format!("{}{}", data_prefix, info.storage_key);
         let raw_bytes = read_zip_entry(&mut archive, &data_path)?;
 
@@ -1057,12 +1097,18 @@ fn find_pkl_name<R: Read + std::io::Seek>(
 }
 
 /// Determine the prefix path for data blobs.
+///
+/// Returns an error if no candidate prefix resolves the first storage key
+/// against the archive — previously this silently fell back to `archive/data/`,
+/// which produced a confusing "ZIP entry not found" later for real `torch.save`
+/// files (which use `<filestem>/data/<n>`).
 fn find_data_prefix<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     infos: &[TensorInfo],
-) -> String {
+    pkl_name: &str,
+) -> FerrotorchResult<String> {
     if infos.is_empty() {
-        return "archive/data/".to_string();
+        return Ok("archive/data/".to_string());
     }
 
     let first_key = &infos[0].storage_key;
@@ -1071,14 +1117,34 @@ fn find_data_prefix<R: Read + std::io::Seek>(
         .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
         .collect();
 
-    for prefix in &["archive/data/", "data/", ""] {
+    // Candidate prefixes, most-specific first:
+    //   1. `<pkl_parent>/data/` — modern torch.save (`real_torch/data/0`).
+    //   2. the legacy layouts `archive/data/`, `data/`, and bare `""`.
+    let mut candidates: Vec<String> = Vec::new();
+    let pkl_parent = std::path::Path::new(pkl_name)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty());
+    if let Some(parent) = pkl_parent {
+        candidates.push(format!("{parent}/data/"));
+    }
+    for fallback in &["archive/data/", "data/", ""] {
+        candidates.push((*fallback).to_string());
+    }
+
+    for prefix in &candidates {
         let candidate = format!("{prefix}{first_key}");
         if names.iter().any(|n| n == &candidate) {
-            return prefix.to_string();
+            return Ok(prefix.clone());
         }
     }
 
-    "archive/data/".to_string()
+    Err(FerrotorchError::InvalidArgument {
+        message: format!(
+            "could not locate tensor data blob for storage key `{first_key}` in pytorch archive \
+             (tried prefixes {candidates:?}; archive entries: {names:?})"
+        ),
+    })
 }
 
 /// Read a named entry from the ZIP archive into a byte vector.
