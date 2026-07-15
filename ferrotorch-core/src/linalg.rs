@@ -6268,7 +6268,7 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
         let d = diagonal(&a, 0).unwrap();
         assert_eq!(d.shape(), &[3]);
-        assert_eq!(d.data().unwrap(), &[1.0, 5.0, 9.0]);
+        assert_eq!(d.data_vec().unwrap(), &[1.0, 5.0, 9.0]);
     }
 
     #[test]
@@ -6276,7 +6276,7 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
         let d = diagonal(&a, 1).unwrap();
         // a[0,1], a[1,2] = 2, 6
-        assert_eq!(d.data().unwrap(), &[2.0, 6.0]);
+        assert_eq!(d.data_vec().unwrap(), &[2.0, 6.0]);
     }
 
     #[test]
@@ -6284,7 +6284,7 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3]);
         let d = diagonal(&a, -1).unwrap();
         // a[1,0], a[2,1] = 4, 8
-        assert_eq!(d.data().unwrap(), &[4.0, 8.0]);
+        assert_eq!(d.data_vec().unwrap(), &[4.0, 8.0]);
     }
 
     // -----------------------------------------------------------------------

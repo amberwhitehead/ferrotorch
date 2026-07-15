@@ -377,12 +377,18 @@ fn test_transformer_block_training() {
         let qkv_chunks = chunk_t(&qkv, 3, 2).unwrap();
 
         let q = qkv_chunks[0]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
         let k = qkv_chunks[1]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
         let v = qkv_chunks[2]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
 

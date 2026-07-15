@@ -614,7 +614,7 @@ fn ferrotorch_lu_factor_probe(a: &Tensor<f32>) -> Result<Tensor<f32>, Box<dyn st
     // start from identity row-permutation `perm = [0..n)`, then for step i
     // swap rows i and ipiv[i]-1 (replay the factorization's pivots).
     let mut perm: Vec<usize> = (0..n).collect();
-    for (i, &piv) in ipiv.iter().enumerate() {
+    for (i, &piv) in ipiv.data()?.iter().enumerate() {
         let j = (piv - 1) as usize;
         perm.swap(i, j);
     }

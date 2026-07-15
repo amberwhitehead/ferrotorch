@@ -442,12 +442,18 @@ fn gpu_transformer_training_smoke() {
         let qkv = qkv_proj.forward(&x).expect("qkv_proj.forward");
         let qkv_chunks = chunk_t(&qkv, 3, 2).expect("chunk_t");
         let q = qkv_chunks[0]
+            .contiguous()
+            .expect("q.contiguous")
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .expect("q.view");
         let k = qkv_chunks[1]
+            .contiguous()
+            .expect("k.contiguous")
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .expect("k.view");
         let v = qkv_chunks[2]
+            .contiguous()
+            .expect("v.contiguous")
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .expect("v.view");
 
@@ -945,17 +951,17 @@ impl NeoXBlockGpu {
         // Attention path
         let qkv = self.qkv.forward(&normed)?;
         let qkv_chunks = chunk_t(&qkv, 3, 2)?;
-        let q = qkv_chunks[0].view(&[
+        let q = qkv_chunks[0].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let k = qkv_chunks[1].view(&[
+        let k = qkv_chunks[1].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let v = qkv_chunks[2].view(&[
+        let v = qkv_chunks[2].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,

@@ -9266,7 +9266,7 @@ mod tests {
         let num = fd_grad64(&a_d, &a_s, 1e-6, |x| {
             linalg_fwd::diagonal(x, offset)
                 .unwrap()
-                .data()
+                .data_vec()
                 .unwrap()
                 .iter()
                 .sum()

@@ -118,12 +118,18 @@ fn test_transformer_training_cpu() {
 
         // Reshape to [batch*n_heads, seq, head_dim]
         let q = qkv_chunks[0]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
         let k = qkv_chunks[1]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
         let v = qkv_chunks[2]
+            .contiguous()
+            .unwrap()
             .view(&[batch as i64 * n_heads as i64, seq as i64, head_dim as i64])
             .unwrap();
 
@@ -493,17 +499,17 @@ impl NeoXBlock {
         let v = &qkv_chunks[2];
 
         // Reshape to [batch*n_heads, seq, head_dim] for bmm
-        let q = q.view(&[
+        let q = q.contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let k = k.view(&[
+        let k = k.contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let v = v.view(&[
+        let v = v.contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,

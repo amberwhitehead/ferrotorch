@@ -73,17 +73,17 @@ impl NeoXBlock {
         let qkv_chunks = chunk_t(&qkv, 3, 2)?;
 
         // Reshape to [batch*n_heads, seq, head_dim]
-        let q = qkv_chunks[0].view(&[
+        let q = qkv_chunks[0].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let k = qkv_chunks[1].view(&[
+        let k = qkv_chunks[1].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
         ])?;
-        let v = qkv_chunks[2].view(&[
+        let v = qkv_chunks[2].contiguous()?.view(&[
             batch as i64 * self.n_heads as i64,
             seq as i64,
             self.head_dim as i64,
