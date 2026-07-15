@@ -457,7 +457,7 @@ fn read_back_f32(t: &Tensor<f32>, expect: Device) -> Vec<f32> {
         );
     }
     if t.is_cpu() {
-        t.data().expect("read CPU data").to_vec()
+        t.data_vec().expect("read CPU data")
     } else {
         let cpu = t.cpu().expect("D2H readback");
         cpu.data().expect("read CPU data after readback").to_vec()
@@ -476,7 +476,7 @@ fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
         );
     }
     if t.is_cpu() {
-        t.data().expect("read CPU data").to_vec()
+        t.data_vec().expect("read CPU data")
     } else {
         let cpu = t.cpu().expect("D2H readback");
         cpu.data().expect("read CPU data after readback").to_vec()
